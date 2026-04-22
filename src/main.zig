@@ -453,9 +453,36 @@ fn digitsU64(n: u64) usize {
     return d;
 }
 
-fn indent(w: *std.Io.Writer, depth: usize) !void {
+fn commaWidth(n: u64) usize {
+    const d = digitsU64(n);
+    return d + (d - 1) / 3;
+}
+
+fn writeCommaU64(w: *std.Io.Writer, n: u64) !void {
+    if (n == 0) {
+        try w.writeByte('0');
+        return;
+    }
+    var buf: [32]u8 = undefined;
+    var i = buf.len;
+    var v = n;
+    var digits: usize = 0;
+    while (v > 0) {
+        if (digits > 0 and digits % 3 == 0) {
+            i -= 1;
+            buf[i] = ',';
+        }
+        i -= 1;
+        buf[i] = @as(u8, @intCast('0' + (v % 10)));
+        v /= 10;
+        digits += 1;
+    }
+    try w.writeAll(buf[i..]);
+}
+
+fn padSpaces(w: *std.Io.Writer, n: usize) !void {
     var i: usize = 0;
-    while (i < depth) : (i += 1) try w.writeAll("│   ");
+    while (i < n) : (i += 1) try w.writeByte(' ');
 }
 
 fn pathDirname(path: []const u8) []const u8 {
@@ -467,41 +494,349 @@ fn lessByTotalDesc(_: void, a: FileCount, b: FileCount) bool {
     return a.total() > b.total();
 }
 
-fn lessByPath(_: void, a: FileCount, b: FileCount) bool {
-    return std.mem.lessThan(u8, a.path, b.path);
+// ---------- styling ----------
+
+const Color = struct {
+    reset: []const u8 = "",
+    bold: []const u8 = "",
+    dim: []const u8 = "",
+    cyan: []const u8 = "",
+    blue: []const u8 = "",
+    green: []const u8 = "",
+    yellow: []const u8 = "",
+    gray: []const u8 = "",
+    magenta: []const u8 = "",
+
+    fn init(enable: bool) Color {
+        if (!enable) return .{};
+        return .{
+            .reset = "\x1b[0m",
+            .bold = "\x1b[1m",
+            .dim = "\x1b[2m",
+            .cyan = "\x1b[36m",
+            .blue = "\x1b[34m",
+            .green = "\x1b[32m",
+            .yellow = "\x1b[33m",
+            .gray = "\x1b[90m",
+            .magenta = "\x1b[35m",
+        };
+    }
+};
+
+fn colorEnabled(allocator: std.mem.Allocator) bool {
+    if (std.process.hasEnvVar(allocator, "NO_COLOR") catch false) return false;
+    return std.fs.File.stdout().isTty();
 }
 
-fn countPathDepth(path: []const u8) usize {
-    var depth: usize = 0;
-    var it = std.mem.splitScalar(u8, path, '/');
-    while (it.next()) |_| depth += 1;
-    return depth;
+fn writeCodeNum(w: *std.Io.Writer, n: u64, width: usize, color: Color) !void {
+    const cw = commaWidth(n);
+    if (width > cw) try padSpaces(w, width - cw);
+    if (n == 0) {
+        try w.writeAll(color.dim);
+        try w.writeByte('0');
+        try w.writeAll(color.reset);
+    } else {
+        try w.writeAll(color.green);
+        try writeCommaU64(w, n);
+        try w.writeAll(color.reset);
+    }
 }
 
-fn dirTotals(files: []const FileCount, prefix: []const u8) struct { c: u64, t: u64 } {
-    var c: u64 = 0;
-    var t: u64 = 0;
+fn writeTestNum(w: *std.Io.Writer, n: u64, width: usize, color: Color) !void {
+    const cw = commaWidth(n);
+    if (width > cw) try padSpaces(w, width - cw);
+    if (n == 0) {
+        try w.writeAll(color.dim);
+        try w.writeByte('0');
+        try w.writeAll(color.reset);
+    } else {
+        try w.writeAll(color.yellow);
+        try writeCommaU64(w, n);
+        try w.writeAll(color.reset);
+    }
+}
+
+fn writePlainPadded(w: *std.Io.Writer, n: u64, width: usize) !void {
+    const cw = commaWidth(n);
+    if (width > cw) try padSpaces(w, width - cw);
+    try writeCommaU64(w, n);
+}
+
+fn writeRightHeader(w: *std.Io.Writer, label: []const u8, width: usize, color: Color) !void {
+    if (width > label.len) try padSpaces(w, width - label.len);
+    try w.writeAll(color.bold);
+    try w.writeAll(label);
+    try w.writeAll(color.reset);
+}
+
+fn writeLeftHeader(w: *std.Io.Writer, label: []const u8, color: Color) !void {
+    try w.writeAll(color.bold);
+    try w.writeAll(label);
+    try w.writeAll(color.reset);
+}
+
+fn writeRule(w: *std.Io.Writer, width: usize, color: Color) !void {
+    try w.writeAll(color.dim);
+    var i: usize = 0;
+    while (i < width) : (i += 1) try w.writeAll("─");
+    try w.writeAll(color.reset);
+    try w.writeByte('\n');
+}
+
+fn writeBar(w: *std.Io.Writer, n: u64, max: u64, width: usize, color: Color) !void {
+    if (max == 0 or width == 0 or n == 0) return;
+    const units: u64 = (n * @as(u64, width) * 8) / max;
+    const full = units / 8;
+    const frac = units % 8;
+    const partials = [_][]const u8{ "", "▏", "▎", "▍", "▌", "▋", "▊", "▉" };
+
+    try w.writeAll(color.blue);
+    var i: u64 = 0;
+    while (i < full) : (i += 1) try w.writeAll("█");
+    if (frac > 0) try w.writeAll(partials[@intCast(frac)]);
+    try w.writeAll(color.reset);
+}
+
+// ---------- tree ----------
+
+const Node = struct {
+    name: []const u8,
+    is_dir: bool,
+    code: u64,
+    test_c: u64,
+    children: std.ArrayList(*Node),
+
+    fn total(self: *const Node) u64 {
+        return self.code + self.test_c;
+    }
+};
+
+fn newNode(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    is_dir: bool,
+) !*Node {
+    const n = try allocator.create(Node);
+    n.* = .{
+        .name = name,
+        .is_dir = is_dir,
+        .code = 0,
+        .test_c = 0,
+        .children = .empty,
+    };
+    return n;
+}
+
+fn getOrCreateChild(
+    allocator: std.mem.Allocator,
+    parent: *Node,
+    name: []const u8,
+    is_dir: bool,
+) !*Node {
+    for (parent.children.items) |c| {
+        if (std.mem.eql(u8, c.name, name)) return c;
+    }
+    const n = try newNode(allocator, name, is_dir);
+    try parent.children.append(allocator, n);
+    return n;
+}
+
+fn buildTree(allocator: std.mem.Allocator, files: []const FileCount) !*Node {
+    const root = try newNode(allocator, ".", true);
     for (files) |f| {
-        if (f.path.len > prefix.len and std.mem.startsWith(u8, f.path, prefix) and f.path[prefix.len] == '/') {
-            c += f.code_count;
-            t += f.test_count;
+        root.code += f.code_count;
+        root.test_c += f.test_count;
+
+        var cursor = root;
+        var it = std.mem.splitScalar(u8, f.path, '/');
+        var part_opt = it.next();
+        while (part_opt) |part| {
+            const next = it.next();
+            const is_file = (next == null);
+            const node = try getOrCreateChild(allocator, cursor, part, !is_file);
+            node.code += f.code_count;
+            node.test_c += f.test_count;
+            cursor = node;
+            part_opt = next;
         }
     }
-    return .{ .c = c, .t = t };
+    return root;
 }
 
-fn writePadded(w: *std.Io.Writer, v: u64, width: usize) !void {
-    const d = digitsU64(v);
-    var pad = if (width > d) width - d else 0;
-    while (pad > 0) : (pad -= 1) try w.writeByte(' ');
-    try w.print("{d}", .{v});
+fn sortTreeAlpha(node: *Node) void {
+    std.mem.sort(*Node, node.children.items, {}, struct {
+        fn lt(_: void, a: *Node, b: *Node) bool {
+            // dirs first, then files; alphabetical within each group
+            if (a.is_dir and !b.is_dir) return true;
+            if (!a.is_dir and b.is_dir) return false;
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lt);
+    for (node.children.items) |c| sortTreeAlpha(c);
 }
 
-fn writePaddedStr(w: *std.Io.Writer, s: []const u8, width: usize) !void {
-    var pad = if (width > s.len) width - s.len else 0;
-    while (pad > 0) : (pad -= 1) try w.writeByte(' ');
-    try w.writeAll(s);
+fn sortTreeDesc(node: *Node) void {
+    std.mem.sort(*Node, node.children.items, {}, struct {
+        fn lt(_: void, a: *Node, b: *Node) bool {
+            if (a.total() != b.total()) return a.total() > b.total();
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lt);
+    for (node.children.items) |c| sortTreeDesc(c);
 }
+
+fn printTree(
+    w: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    node: *const Node,
+    prefix: []const u8,
+    is_last: bool,
+    is_root: bool,
+    max_c: usize,
+    max_t: usize,
+    color: Color,
+) !void {
+    try writeCodeNum(w, node.code, max_c, color);
+    try w.writeAll("  ");
+    try writeTestNum(w, node.test_c, max_t, color);
+    try w.writeAll("  ");
+
+    if (is_root) {
+        try w.writeAll(color.bold);
+        try w.writeAll(node.name);
+        try w.writeAll(color.reset);
+        try w.writeByte('\n');
+    } else {
+        try w.writeAll(color.gray);
+        try w.writeAll(prefix);
+        try w.writeAll(if (is_last) "└── " else "├── ");
+        try w.writeAll(color.reset);
+        if (node.is_dir) {
+            try w.writeAll(color.cyan);
+            try w.writeAll(node.name);
+            try w.writeByte('/');
+            try w.writeAll(color.reset);
+        } else {
+            try w.writeAll(node.name);
+        }
+        try w.writeByte('\n');
+    }
+
+    const new_prefix = if (is_root)
+        try allocator.dupe(u8, "")
+    else blk: {
+        const ext = if (is_last) "    " else "│   ";
+        break :blk try std.mem.concat(allocator, u8, &.{ prefix, ext });
+    };
+
+    for (node.children.items, 0..) |child, i| {
+        const child_last = (i == node.children.items.len - 1);
+        try printTree(w, allocator, child, new_prefix, child_last, false, max_c, max_t, color);
+    }
+}
+
+// ---------- summary ----------
+
+const ExtRow = struct {
+    ext: []const u8,
+    code: u64,
+    test_c: u64,
+
+    fn total(self: ExtRow) u64 {
+        return self.code + self.test_c;
+    }
+};
+
+fn printExtensionTable(
+    w: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    files: []const FileCount,
+    total_code: u64,
+    total_test: u64,
+    descending: bool,
+    color: Color,
+) !void {
+    const exts = try uniqExtensions(allocator, files);
+    const rows = try allocator.alloc(ExtRow, exts.items.len);
+    for (exts.items, 0..) |e, i| {
+        var ec: u64 = 0;
+        var et: u64 = 0;
+        for (files) |f| {
+            const fe = fileExtension(f.path) orelse continue;
+            if (!std.mem.eql(u8, fe, e)) continue;
+            ec += f.code_count;
+            et += f.test_count;
+        }
+        rows[i] = .{ .ext = e, .code = ec, .test_c = et };
+    }
+
+    if (descending) {
+        std.mem.sort(ExtRow, rows, {}, struct {
+            fn lt(_: void, a: ExtRow, b: ExtRow) bool {
+                if (a.total() != b.total()) return a.total() > b.total();
+                return std.mem.lessThan(u8, a.ext, b.ext);
+            }
+        }.lt);
+    } else {
+        std.mem.sort(ExtRow, rows, {}, struct {
+            fn lt(_: void, a: ExtRow, b: ExtRow) bool {
+                return std.mem.lessThan(u8, a.ext, b.ext);
+            }
+        }.lt);
+    }
+
+    var max_c: usize = @max(commaWidth(total_code), 4);
+    var max_t: usize = @max(commaWidth(total_test), 4);
+    var max_ext: usize = 4; // "TYPE"
+    for (rows) |r| {
+        max_c = @max(max_c, commaWidth(r.code));
+        max_t = @max(max_t, commaWidth(r.test_c));
+        max_ext = @max(max_ext, r.ext.len + 1); // +1 for leading '.'
+    }
+    const bar_width: usize = 20;
+
+    var max_total: u64 = 0;
+    for (rows) |r| max_total = @max(max_total, r.total());
+
+    // Header row
+    try writeRightHeader(w, "CODE", max_c, color);
+    try w.writeAll("  ");
+    try writeRightHeader(w, "TEST", max_t, color);
+    try w.writeAll("  ");
+    try writeLeftHeader(w, "TYPE", color);
+    try w.writeByte('\n');
+
+    const header_rule_width = max_c + 2 + max_t + 2 + max_ext + 1 + bar_width;
+    try writeRule(w, header_rule_width, color);
+
+    for (rows) |r| {
+        try writeCodeNum(w, r.code, max_c, color);
+        try w.writeAll("  ");
+        try writeTestNum(w, r.test_c, max_t, color);
+        try w.writeAll("  ");
+        try w.writeAll(color.dim);
+        try w.writeByte('.');
+        try w.writeAll(color.reset);
+        try w.writeAll(r.ext);
+        const written = r.ext.len + 1;
+        if (max_ext > written) try padSpaces(w, max_ext - written);
+        try w.writeByte(' ');
+        try writeBar(w, r.total(), max_total, bar_width, color);
+        try w.writeByte('\n');
+    }
+
+    try writeRule(w, max_c + 2 + max_t, color);
+
+    try w.writeAll(color.bold);
+    try writePlainPadded(w, total_code, max_c);
+    try w.writeAll("  ");
+    try writePlainPadded(w, total_test, max_t);
+    try w.writeAll("  TOTAL");
+    try w.writeAll(color.reset);
+    try w.writeByte('\n');
+}
+
+// ---------- main ----------
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -529,14 +864,9 @@ pub fn main() !void {
         return;
     }
 
-    const allowed = try buildAllowedExts(allocator, &opts);
+    const color = Color.init(colorEnabled(allocator));
 
-    try stdout.writeAll("Included extensions: ");
-    for (allowed.items, 0..) |e, i| {
-        if (i > 0) try stdout.writeAll(", ");
-        try stdout.writeAll(e);
-    }
-    try stdout.writeByte('\n');
+    const allowed = try buildAllowedExts(allocator, &opts);
 
     var files_raw: std.ArrayList([]const u8) = .empty;
     if (isInsideGitRepo(allocator)) {
@@ -567,150 +897,80 @@ pub fn main() !void {
         });
     }
 
-    const total_sloc = total_code + total_test;
+    if (files.items.len == 0) {
+        try w_noFiles(stdout, color);
+        try stdout.flush();
+        return;
+    }
 
-    if (opts.summary) {
-        try stdout.print("Total SLOC: {d}  (code: {d}, test: {d})\n", .{ total_sloc, total_code, total_test });
-    } else {
-        var max_c: usize = @max(digitsU64(total_code), 5);
-        var max_t: usize = @max(digitsU64(total_test), 5);
+    if (!opts.summary) {
+        var max_c: usize = @max(commaWidth(total_code), 4);
+        var max_t: usize = @max(commaWidth(total_test), 4);
         for (files.items) |f| {
-            max_c = @max(max_c, digitsU64(f.code_count));
-            max_t = @max(max_t, digitsU64(f.test_count));
+            max_c = @max(max_c, commaWidth(f.code_count));
+            max_t = @max(max_t, commaWidth(f.test_count));
         }
 
-        try writePaddedStr(stdout, "code", max_c);
+        try writeRightHeader(stdout, "CODE", max_c, color);
         try stdout.writeAll("  ");
-        try writePaddedStr(stdout, "test", max_t);
-        try stdout.writeAll("  path\n");
+        try writeRightHeader(stdout, "TEST", max_t, color);
+        try stdout.writeAll("  ");
+        try writeLeftHeader(stdout, "PATH", color);
+        try stdout.writeByte('\n');
+        try writeRule(stdout, max_c + 2 + max_t + 2 + 32, color);
 
         if (opts.descending) {
+            try writeCodeNum(stdout, total_code, max_c, color);
+            try stdout.writeAll("  ");
+            try writeTestNum(stdout, total_test, max_t, color);
+            try stdout.writeAll("  ");
+            try stdout.writeAll(color.bold);
+            try stdout.writeAll(".");
+            try stdout.writeAll(color.reset);
+            try stdout.writeByte('\n');
+
             const sorted = try allocator.alloc(FileCount, files.items.len);
             @memcpy(sorted, files.items);
             std.mem.sort(FileCount, sorted, {}, lessByTotalDesc);
             for (sorted) |f| {
-                try writePadded(stdout, f.code_count, max_c);
+                try writeCodeNum(stdout, f.code_count, max_c, color);
                 try stdout.writeAll("  ");
-                try writePadded(stdout, f.test_count, max_t);
+                try writeTestNum(stdout, f.test_count, max_t, color);
                 try stdout.writeAll("  ");
-                try stdout.writeAll(f.path);
+                if (isTestPath(f.path)) {
+                    try stdout.writeAll(color.yellow);
+                    try stdout.writeAll(f.path);
+                    try stdout.writeAll(color.reset);
+                } else {
+                    try stdout.writeAll(f.path);
+                }
                 try stdout.writeByte('\n');
             }
         } else {
-            const sorted = try allocator.alloc(FileCount, files.items.len);
-            @memcpy(sorted, files.items);
-            std.mem.sort(FileCount, sorted, {}, lessByPath);
-
-            try writePadded(stdout, total_code, max_c);
-            try stdout.writeAll("  ");
-            try writePadded(stdout, total_test, max_t);
-            try stdout.writeAll("  .\n");
-
-            var printed = std.StringHashMap(void).init(allocator);
-
-            for (sorted) |f| {
-                const dir = pathDirname(f.path);
-                const basename = std.fs.path.basename(f.path);
-
-                var depth: usize = 0;
-                if (!std.mem.eql(u8, dir, ".")) {
-                    depth = countPathDepth(dir);
-                }
-
-                if (!std.mem.eql(u8, dir, ".")) {
-                    var idx: usize = 0;
-                    while (idx <= dir.len) {
-                        const next_slash = std.mem.indexOfScalarPos(u8, dir, idx, '/');
-                        const end = next_slash orelse dir.len;
-                        if (end == idx) {
-                            if (next_slash == null) break;
-                            idx = end + 1;
-                            continue;
-                        }
-                        const current_dir = dir[0..end];
-                        if (!printed.contains(current_dir)) {
-                            const totals = dirTotals(sorted, current_dir);
-                            const this_depth = std.mem.count(u8, current_dir, "/");
-                            const dir_name = std.fs.path.basename(current_dir);
-                            try writePadded(stdout, totals.c, max_c);
-                            try stdout.writeAll("  ");
-                            try writePadded(stdout, totals.t, max_t);
-                            try stdout.writeAll("  ");
-                            try indent(stdout, this_depth);
-                            try stdout.print("├──{s}/\n", .{dir_name});
-                            const key = try allocator.dupe(u8, current_dir);
-                            try printed.put(key, {});
-                        }
-                        if (next_slash == null) break;
-                        idx = end + 1;
-                    }
-                }
-
-                try writePadded(stdout, f.code_count, max_c);
-                try stdout.writeAll("  ");
-                try writePadded(stdout, f.test_count, max_t);
-                try stdout.writeAll("  ");
-                try indent(stdout, depth);
-                try stdout.print("├──{s}\n", .{basename});
-            }
-        }
-    }
-
-    if (files.items.len > 0) {
-        try stdout.writeByte('\n');
-        try stdout.writeAll("Summary by file type:\n");
-
-        const exts = try uniqExtensions(allocator, files.items);
-
-        const ExtRow = struct {
-            ext: []const u8,
-            code: u64,
-            test_c: u64,
-        };
-
-        const rows = try allocator.alloc(ExtRow, exts.items.len);
-        for (exts.items, 0..) |e, i| {
-            var ec: u64 = 0;
-            var et: u64 = 0;
-            for (files.items) |f| {
-                const fe = fileExtension(f.path) orelse continue;
-                if (!std.mem.eql(u8, fe, e)) continue;
-                ec += f.code_count;
-                et += f.test_count;
-            }
-            rows[i] = .{ .ext = e, .code = ec, .test_c = et };
-        }
-
-        if (opts.descending) {
-            std.mem.sort(ExtRow, rows, {}, struct {
-                fn lt(_: void, a: ExtRow, b: ExtRow) bool {
-                    return (a.code + a.test_c) > (b.code + b.test_c);
-                }
-            }.lt);
-        } else {
-            std.mem.sort(ExtRow, rows, {}, struct {
-                fn lt(_: void, a: ExtRow, b: ExtRow) bool {
-                    return std.mem.lessThan(u8, a.ext, b.ext);
-                }
-            }.lt);
-        }
-
-        for (rows) |r| {
-            try writePadded(stdout, r.code, 6);
-            try stdout.writeAll("  ");
-            try writePadded(stdout, r.test_c, 6);
-            try stdout.writeAll("  .");
-            try stdout.writeAll(r.ext);
-            try stdout.writeByte('\n');
+            const root = try buildTree(allocator, files.items);
+            sortTreeAlpha(root);
+            try printTree(stdout, allocator, root, "", false, true, max_c, max_t, color);
         }
         try stdout.writeByte('\n');
-        try writePadded(stdout, total_code, 6);
-        try stdout.writeAll("  ");
-        try writePadded(stdout, total_test, 6);
-        try stdout.writeAll("  TOTAL (code / test)\n");
     }
+
+    try printExtensionTable(
+        stdout,
+        allocator,
+        files.items,
+        total_code,
+        total_test,
+        opts.descending,
+        color,
+    );
 
     try stdout.flush();
+}
+
+fn w_noFiles(w: *std.Io.Writer, color: Color) !void {
+    try w.writeAll(color.dim);
+    try w.writeAll("No matching files.\n");
+    try w.writeAll(color.reset);
 }
 
 // ---------- tests ----------
@@ -785,4 +1045,12 @@ test "countFile - force_test" {
     const r = countFile(src, true, false);
     try std.testing.expectEqual(@as(u64, 2), r.test_count);
     try std.testing.expectEqual(@as(u64, 0), r.code_count);
+}
+
+test "commaWidth and writeCommaU64" {
+    try std.testing.expectEqual(@as(usize, 1), commaWidth(0));
+    try std.testing.expectEqual(@as(usize, 1), commaWidth(9));
+    try std.testing.expectEqual(@as(usize, 3), commaWidth(999));
+    try std.testing.expectEqual(@as(usize, 5), commaWidth(1000));
+    try std.testing.expectEqual(@as(usize, 9), commaWidth(1000000));
 }
