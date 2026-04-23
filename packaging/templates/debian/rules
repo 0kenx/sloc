@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export DEB_VERSION_UPSTREAM := $(shell dpkg-parsechangelog -SVersion | sed 's/-[^-]*$$//')
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	zig build -Doptimize=ReleaseSafe -Dversion=$(DEB_VERSION_UPSTREAM)
+
+override_dh_auto_test:
+	zig build test -Dversion=$(DEB_VERSION_UPSTREAM)
+
+override_dh_auto_install:
+	zig build -Doptimize=ReleaseSafe -Dversion=$(DEB_VERSION_UPSTREAM) --prefix $(CURDIR)/debian/sloc/usr

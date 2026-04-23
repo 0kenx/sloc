@@ -1,0 +1,15 @@
+Source: sloc
+Section: utils
+Priority: optional
+Maintainer: @MAINTAINER@
+Build-Depends: debhelper-compat (= 13), zig (>= 0.15.2)
+Standards-Version: 4.7.0
+Homepage: https://github.com/@REPO@
+Rules-Requires-Root: no
+
+Package: sloc
+Architecture: any
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: fast source-lines-of-code counter with separate test totals
+ A fast, standalone source-lines-of-code counter that separates code and test
+ lines while skipping blanks, bracket-only lines, and single-line comments.

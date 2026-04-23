@@ -1,0 +1,25 @@
+pkgname=sloc
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Fast source-lines-of-code counter with separate code and test totals'
+arch=('x86_64' 'aarch64')
+url='https://github.com/@REPO@'
+license=('MIT')
+makedepends=('zig')
+source=("${pkgname}-${pkgver}-source.tar.gz::https://github.com/@REPO@/releases/download/v${pkgver}/${pkgname}-${pkgver}-source.tar.gz")
+sha256sums=('@SHA256@')
+
+build() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  zig build -Doptimize=ReleaseFast -Dversion="${pkgver}"
+}
+
+check() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  zig build test -Dversion="${pkgver}"
+}
+
+package() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  zig build -Doptimize=ReleaseFast -Dversion="${pkgver}" --prefix "${pkgdir}/usr"
+}

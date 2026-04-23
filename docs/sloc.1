@@ -1,0 +1,58 @@
+.TH SLOC 1 "April 2026" "sloc" "User Commands"
+.SH NAME
+sloc \- count source lines of code and tests
+.SH SYNOPSIS
+.B sloc
+[\fB-a\fR ext1,ext2]
+[\fB-e\fR ext1,ext2]
+[\fB-o\fR ext1,ext2]
+[\fB-d\fR]
+[\fB-s\fR]
+[\fB-V\fR]
+[\fB-h\fR]
+.SH DESCRIPTION
+\fBsloc\fR is a fast, standalone source-lines-of-code counter that separates
+code and test lines. It ignores blank lines, bracket-only lines, and
+single-line comments.
+.PP
+When run inside a Git repository, \fBsloc\fR uses tracked and untracked
+non-ignored files from \fBgit ls-files\fR. Outside Git, it falls back to a
+recursive directory walk.
+.SH OPTIONS
+.TP
+.BR -a ", " --add " ext1,ext2"
+Include additional file extensions.
+.TP
+.BR -e ", " --exclude " ext1,ext2"
+Exclude specific file extensions.
+.TP
+.BR -o ", " --only " ext1,ext2"
+Only include the listed file extensions. This overrides \fB--add\fR and
+\fB--exclude\fR.
+.TP
+.BR -d ", " --descending
+Display results in descending order by total counted lines.
+.TP
+.BR -s ", " --summary
+Print only totals by file type.
+.TP
+.BR -V ", " --version
+Print the program version.
+.TP
+.BR -h ", " --help
+Show usage information.
+.SH TEST DETECTION
+Files are treated as tests when their paths match common test directories such
+as \fBtests/\fR, \fBspec/\fR, \fB__tests__/\fR, \fBe2e/\fR, or when filenames
+match patterns such as \fB*_test.*\fR, \fB*.spec.*\fR, \fBconftest.py\fR, and
+common JVM test suffixes. Rust \fB#[cfg(test)] mod ...\fR blocks are counted as
+test lines even inside non-test files.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 2
+Invalid command-line arguments.
+.SH SEE ALSO
+.BR git (1)

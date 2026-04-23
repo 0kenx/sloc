@@ -1,0 +1,5 @@
+sloc (@VERSION@-1) unstable; urgency=medium
+
+  * Initial release.
+
+ -- @MAINTAINER@  @DATE_RFC2822@

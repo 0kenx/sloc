@@ -1,2 +1,6 @@
 .zig-cache/
+.zig-global-cache/
 zig-out/
+packaging/rendered/
+result
+result-*

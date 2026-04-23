@@ -1,16 +1,32 @@
 const std = @import("std");
+const build_options = @import("build_options");
 
 const default_exts = [_][]const u8{
-    "c",     "cpp",   "h",     "hpp",   "cmake",  "mk",   "bzl",  "py",
-    "ipynb", "js",    "jsx",   "ts",    "svelte", "css",  "htm",  "html",
-    "htmx",  "xhtml", "go",    "java",  "hs",     "fut",  "sol",  "move",
-    "mo",    "rs",    "zig",   "sh",    "nix",    "tf",   "lua",  "yml",
-    "json",  "proto", "gql",   "sql",
+    "c",       "cpp",        "h",     "hpp",  "cmake",    "mk",     "bzl",      "py",
+    "ipynb",   "js",         "jsx",   "ts",   "svelte",   "css",    "htm",      "html",
+    "htmx",    "xhtml",      "go",    "java", "hs",       "fut",    "sol",      "move",
+    "mo",      "rs",         "zig",   "sh",   "nix",      "tf",     "lua",      "yml",
+    "json",    "proto",      "gql",   "sql",  "agda",     "asm",    "s",        "brs",
+    "cc",      "cxx",        "hh",    "hxx",  "cs",       "clj",    "cljs",     "cljc",
+    "coffee",  "litcoffee",  "iced",  "cr",   "scss",     "sass",   "less",     "styl",
+    "dart",    "ex",         "exs",   "erl",  "hrl",      "fs",     "fsi",      "fsx",
+    "f",       "for",        "f90",   "f95",  "f03",      "f08",    "groovy",   "gradle",
+    "hbs",     "handlebars", "hx",    "hy",   "jade",     "jl",     "kt",       "kts",
+    "tex",     "ly",         "ls",    "mjs",  "mochi",    "monkey", "mustache", "nim",
+    "nims",    "m",          "mm",    "ml",   "mli",      "pl",     "pm",       "php",
+    "prql",    "pug",        "r",     "rkt",  "rpy",      "rb",     "scala",    "nut",
+    "svg",     "swift",      "tsx",   "vb",   "xml",      "yaml",   "vhd",      "vhdl",
+    "v",       "vh",         "sv",    "svh",  "lagda",    "bs",     "csx",      "liticed",
+    "stylus",  "escript",    "xrl",   "yrl",  "fsscript", "gvy",    "gy",       "gsh",
+    "lhs",     "cjs",        "ily",   "lyi",  "mll",      "mly",    "t",        "pod",
+    "phtml",   "php3",       "php4",  "php5", "phps",     "pyi",    "pyw",      "rktd",
+    "rktl",    "rpym",       "rpymc", "sc",   "bas",      "cls",    "frm",      "shtml",
+    "app.src",
 };
 
 const test_path_dirs = [_][]const u8{
-    "test",    "tests",      "spec",       "specs",   "__tests__",
-    "e2e",     "cypress",    "playwright", "testing", "fixtures",
+    "test", "tests",   "spec",       "specs",   "__tests__",
+    "e2e",  "cypress", "playwright", "testing", "fixtures",
 };
 
 const jvm_exts = [_][]const u8{ "java", "kt", "scala", "groovy" };
@@ -19,6 +35,7 @@ const filename_test_suffixes = [_][]const u8{ "_test", "_tests", "_spec" };
 
 const FileCount = struct {
     path: []const u8,
+    ext: []const u8,
     test_count: u64,
     code_count: u64,
 
@@ -33,6 +50,7 @@ const Options = struct {
     only: std.ArrayList([]const u8) = .empty,
     descending: bool = false,
     summary: bool = false,
+    version: bool = false,
     help: bool = false,
 };
 
@@ -49,6 +67,8 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Options {
             opts.descending = true;
         } else if (std.mem.eql(u8, a, "-s") or std.mem.eql(u8, a, "--summary")) {
             opts.summary = true;
+        } else if (std.mem.eql(u8, a, "-V") or std.mem.eql(u8, a, "--version")) {
+            opts.version = true;
         } else if (try takeValueArg(argv, &i, a, "-a", "--add")) |v| {
             try opts.add.append(allocator, v);
         } else if (try takeValueArg(argv, &i, a, "-e", "--exclude")) |v| {
@@ -87,8 +107,9 @@ fn takeValueArg(
 }
 
 fn printHelp(w: *std.Io.Writer) !void {
+    try w.print("sloc {s}\n\n", .{build_options.version});
     try w.writeAll(
-        \\Usage: sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-h]
+        \\Usage: sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-V] [-h]
         \\Count lines of code and tests, excluding blanks, bracket-only lines, and comments.
         \\
         \\Options:
@@ -97,6 +118,7 @@ fn printHelp(w: *std.Io.Writer) !void {
         \\  -o, --only ext1,ext2    Include ONLY the specified extensions (overrides -a and -e)
         \\  -d, --descending        Display results in descending order by line count
         \\  -s, --summary           Summary mode - only show totals
+        \\  -V, --version           Display version information
         \\  -h, --help              Display this help message
         \\
         \\Test detection:
@@ -117,6 +139,10 @@ fn printHelp(w: *std.Io.Writer) !void {
     try w.writeByte('\n');
 }
 
+fn printVersion(w: *std.Io.Writer) !void {
+    try w.print("sloc {s}\n", .{build_options.version});
+}
+
 fn splitCommaAppend(
     allocator: std.mem.Allocator,
     out: *std.ArrayList([]const u8),
@@ -126,12 +152,26 @@ fn splitCommaAppend(
     while (it.next()) |part| {
         const trimmed = std.mem.trim(u8, part, " \t");
         if (trimmed.len == 0) continue;
-        try out.append(allocator, trimmed);
+        const normalized = if (trimmed[0] == '.' and trimmed.len > 1) trimmed[1..] else trimmed;
+        if (normalized.len == 0) continue;
+        try out.append(allocator, normalized);
     }
 }
 
+fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(a, b);
+}
+
+fn asciiStartsWithIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    return haystack.len >= needle.len and asciiEqlIgnoreCase(haystack[0..needle.len], needle);
+}
+
+fn asciiEndsWithIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    return haystack.len >= needle.len and asciiEqlIgnoreCase(haystack[haystack.len - needle.len ..], needle);
+}
+
 fn hasExt(list: []const []const u8, ext: []const u8) bool {
-    for (list) |e| if (std.mem.eql(u8, e, ext)) return true;
+    for (list) |e| if (asciiEqlIgnoreCase(e, ext)) return true;
     return false;
 }
 
@@ -140,6 +180,26 @@ fn fileExtension(path: []const u8) ?[]const u8 {
     const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse return null;
     if (dot == 0 or dot + 1 == base.len) return null;
     return base[dot + 1 ..];
+}
+
+fn basenameMatchesExt(base: []const u8, ext: []const u8) bool {
+    if (ext.len == 0) return false;
+    if (base.len <= ext.len + 1) return false;
+
+    const dot = base.len - ext.len - 1;
+    if (dot == 0 or base[dot] != '.') return false;
+
+    return asciiEqlIgnoreCase(base[dot + 1 ..], ext);
+}
+
+fn matchedAllowedExt(path: []const u8, allowed: []const []const u8) ?[]const u8 {
+    const base = std.fs.path.basename(path);
+    var best: ?[]const u8 = null;
+    for (allowed) |ext| {
+        if (!basenameMatchesExt(base, ext)) continue;
+        if (best == null or ext.len > best.?.len) best = ext;
+    }
+    return best;
 }
 
 fn isTestPath(path: []const u8) bool {
@@ -156,14 +216,14 @@ fn isTestPath(path: []const u8) bool {
     if (n >= 2) {
         for (parts_buf[0 .. n - 1]) |comp| {
             for (test_path_dirs) |td| {
-                if (std.mem.eql(u8, comp, td)) return true;
+                if (asciiEqlIgnoreCase(comp, td)) return true;
             }
         }
     }
 
     const base = parts_buf[n - 1];
 
-    if (std.mem.eql(u8, base, "conftest.py")) return true;
+    if (asciiEqlIgnoreCase(base, "conftest.py")) return true;
 
     const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse return false;
     if (dot == 0) return false;
@@ -171,26 +231,26 @@ fn isTestPath(path: []const u8) bool {
     const ext = base[dot + 1 ..];
     if (ext.len == 0) return false;
 
-    if (std.mem.startsWith(u8, name, "test_") and name.len > 5) return true;
-    if (std.mem.startsWith(u8, name, "tests_") and name.len > 6) return true;
+    if (asciiStartsWithIgnoreCase(name, "test_") and name.len > 5) return true;
+    if (asciiStartsWithIgnoreCase(name, "tests_") and name.len > 6) return true;
 
     for (filename_test_suffixes) |s| {
-        if (name.len > s.len and std.mem.endsWith(u8, name, s)) return true;
+        if (name.len > s.len and asciiEndsWithIgnoreCase(name, s)) return true;
     }
 
     if (std.mem.lastIndexOfScalar(u8, name, '.')) |inner| {
         const inner_ext = name[inner + 1 ..];
-        if (std.mem.eql(u8, inner_ext, "test") or std.mem.eql(u8, inner_ext, "spec")) return true;
+        if (asciiEqlIgnoreCase(inner_ext, "test") or asciiEqlIgnoreCase(inner_ext, "spec")) return true;
     }
 
     var is_jvm = false;
-    for (jvm_exts) |je| if (std.mem.eql(u8, ext, je)) {
+    for (jvm_exts) |je| if (asciiEqlIgnoreCase(ext, je)) {
         is_jvm = true;
         break;
     };
     if (is_jvm) {
         for (jvm_test_suffixes) |s| {
-            if (name.len > s.len and std.mem.endsWith(u8, name, s)) return true;
+            if (name.len > s.len and asciiEndsWithIgnoreCase(name, s)) return true;
         }
     }
 
@@ -346,8 +406,7 @@ fn isInsideGitRepo(allocator: std.mem.Allocator) bool {
 }
 
 fn matchesExtFilter(path: []const u8, allowed: []const []const u8) bool {
-    const ext = fileExtension(path) orelse return false;
-    return hasExt(allowed, ext);
+    return matchedAllowedExt(path, allowed) != null;
 }
 
 fn collectFilesGit(
@@ -415,7 +474,7 @@ fn buildAllowedExts(
         var filtered: std.ArrayList([]const u8) = .empty;
         outer: for (list.items) |e| {
             for (excluded.items) |x| {
-                if (std.mem.eql(u8, e, x)) continue :outer;
+                if (asciiEqlIgnoreCase(e, x)) continue :outer;
             }
             try filtered.append(allocator, e);
         }
@@ -432,7 +491,7 @@ fn uniqExtensions(
     var list: std.ArrayList([]const u8) = .empty;
     var seen = std.StringHashMap(void).init(allocator);
     for (files) |f| {
-        const ext = fileExtension(f.path) orelse continue;
+        const ext = f.ext;
         if (seen.contains(ext)) continue;
         try seen.put(ext, {});
         try list.append(allocator, ext);
@@ -762,8 +821,7 @@ fn printExtensionTable(
         var ec: u64 = 0;
         var et: u64 = 0;
         for (files) |f| {
-            const fe = fileExtension(f.path) orelse continue;
-            if (!std.mem.eql(u8, fe, e)) continue;
+            if (!asciiEqlIgnoreCase(f.ext, e)) continue;
             ec += f.code_count;
             et += f.test_count;
         }
@@ -864,6 +922,12 @@ pub fn main() !void {
         return;
     }
 
+    if (opts.version) {
+        try printVersion(stdout);
+        try stdout.flush();
+        return;
+    }
+
     const color = Color.init(colorEnabled(allocator));
 
     const allowed = try buildAllowedExts(allocator, &opts);
@@ -883,15 +947,16 @@ pub fn main() !void {
     for (files_raw.items) |path| {
         const content = std.fs.cwd().readFileAlloc(allocator, path, 128 * 1024 * 1024) catch continue;
         const force_test = isTestPath(path);
+        const matched_ext = matchedAllowedExt(path, allowed.items) orelse continue;
         const is_rust = blk: {
-            const ext = fileExtension(path) orelse break :blk false;
-            break :blk std.mem.eql(u8, ext, "rs");
+            break :blk asciiEqlIgnoreCase(matched_ext, "rs");
         };
         const c = countFile(content, force_test, is_rust);
         total_code += c.code_count;
         total_test += c.test_count;
         try files.append(allocator, .{
             .path = path,
+            .ext = matched_ext,
             .test_count = c.test_count,
             .code_count = c.code_count,
         });
@@ -991,9 +1056,32 @@ test "isTestPath - filename patterns" {
     try std.testing.expect(isTestPath("test_foo.py"));
     try std.testing.expect(isTestPath("conftest.py"));
     try std.testing.expect(isTestPath("FooTest.java"));
+    try std.testing.expect(isTestPath("FooTests.JAVA"));
     try std.testing.expect(isTestPath("FooIT.scala"));
     try std.testing.expect(!isTestPath("FooTest.py"));
     try std.testing.expect(!isTestPath("main.go"));
+}
+
+test "matchedAllowedExt - case insensitive and multi-dot" {
+    const allowed = [_][]const u8{ "rs", "app.src", "py" };
+
+    try std.testing.expectEqualStrings("rs", matchedAllowedExt("src/LIB.RS", &allowed).?);
+    try std.testing.expectEqualStrings("app.src", matchedAllowedExt("src/demo.APP.SRC", &allowed).?);
+    try std.testing.expectEqualStrings("py", matchedAllowedExt("src/tool.Py", &allowed).?);
+    try std.testing.expect(matchedAllowedExt("src/.rs", &allowed) == null);
+}
+
+test "splitCommaAppend - strips leading dot" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var list: std.ArrayList([]const u8) = .empty;
+    try splitCommaAppend(arena.allocator(), &list, ".py, app.src, .RS");
+
+    try std.testing.expectEqual(@as(usize, 3), list.items.len);
+    try std.testing.expectEqualStrings("py", list.items[0]);
+    try std.testing.expectEqualStrings("app.src", list.items[1]);
+    try std.testing.expectEqualStrings("RS", list.items[2]);
 }
 
 test "isSkippedLine" {
@@ -1053,4 +1141,10 @@ test "commaWidth and writeCommaU64" {
     try std.testing.expectEqual(@as(usize, 3), commaWidth(999));
     try std.testing.expectEqual(@as(usize, 5), commaWidth(1000));
     try std.testing.expectEqual(@as(usize, 9), commaWidth(1000000));
+}
+
+test "parseArgs - version flag" {
+    const argv = [_][]const u8{ "sloc", "--version" };
+    const opts = try parseArgs(std.testing.allocator, &argv);
+    try std.testing.expect(opts.version);
 }

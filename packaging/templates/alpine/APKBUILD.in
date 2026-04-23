@@ -1,0 +1,31 @@
+# Contributor: 0kenx <km@nxfi.app>
+# Maintainer: 0kenx <km@nxfi.app>
+pkgname=sloc
+pkgver=@VERSION@
+pkgrel=0
+pkgdesc="Fast source-lines-of-code counter with separate code and test totals"
+url="https://github.com/@REPO@"
+arch="all"
+license="MIT"
+makedepends="zig"
+source="$pkgname-$pkgver-source.tar.gz::https://github.com/@REPO@/releases/download/v$pkgver/$pkgname-$pkgver-source.tar.gz"
+builddir="$srcdir/$pkgname-$pkgver"
+
+build() {
+	cd "$builddir"
+	zig build -Doptimize=ReleaseFast -Dversion="$pkgver"
+}
+
+check() {
+	cd "$builddir"
+	zig build test -Dversion="$pkgver"
+}
+
+package() {
+	cd "$builddir"
+	zig build -Doptimize=ReleaseFast -Dversion="$pkgver" --prefix "$pkgdir/usr"
+}
+
+sha256sums="
+@SHA256@  sloc-@VERSION@-source.tar.gz
+"

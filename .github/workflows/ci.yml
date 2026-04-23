@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Check release version sync
+        run: ./scripts/check-version-sync.sh
+
+      - name: Check formatting
+        run: zig fmt --check build.zig src/main.zig
+
+      - name: Run tests
+        run: zig build test -Dversion="$(cat VERSION)"
+
+      - name: Build release binary
+        run: zig build -Doptimize=ReleaseFast -Dversion="$(cat VERSION)"
