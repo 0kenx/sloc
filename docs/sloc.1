@@ -8,11 +8,16 @@ sloc \- count source lines of code, comments, and tests
 [\fB-o\fR ext1,ext2]
 [\fB-d\fR]
 [\fB-s\fR]
+[\fB-n\fR]
+[\fB-c\fR]
+[\fB-b\fR]
+[\fB-p\fR]
 [\fB-V\fR]
 [\fB-h\fR]
 .SH DESCRIPTION
 \fBsloc\fR is a fast, standalone source-lines-of-code counter that separates
-code, comment, and test lines. It ignores blank lines and bracket-only lines.
+code, comment, and test lines by default. Blank lines are optional, and
+symbol-only lines are excluded unless enabled.
 .PP
 When run inside a Git repository, \fBsloc\fR uses tracked and untracked
 non-ignored files from \fBgit ls-files\fR. Outside Git, it falls back to a
@@ -34,6 +39,30 @@ Display results in descending order by total counted lines.
 .TP
 .BR -s ", " --summary
 Print only totals by file type.
+.TP
+.BR -n ", " --no-split-tests
+Merge test lines into the main code or lines column.
+.TP
+.BR -c ", " --no-comments
+Exclude comment lines from counts and output.
+.TP
+.BR -b ", " --blanks
+Show blank-line counts.
+.TP
+.BR -p ", " --count-symbols
+Count symbol-only lines as code or test.
+.TP
+.BR --split-tests
+Show separate code and test columns. This is the default.
+.TP
+.BR --comments
+Show comment-line counts. This is the default.
+.TP
+.BR --no-blanks
+Exclude blank lines from counts and output. This is the default.
+.TP
+.BR --no-count-symbols
+Exclude symbol-only lines from counts. This is the default.
 .TP
 .BR -V ", " --version
 Print the program version.

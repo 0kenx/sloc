@@ -1,29 +1,34 @@
 # sloc
 
 A fast, standalone source-lines-of-code counter that splits counts into **code**,
-**comment**, and **test** lines. Zero runtime dependencies (not even `awk` or `git` at build time
+**comment**, and **test** lines by default, with optional blank-line counting and
+configurable test splitting. Zero runtime dependencies (not even `awk` or `git` at build time
 — `git` is used opportunistically at run time when inside a repo).
 
 Originally a fish function; rewritten in Zig as a single static binary.
 
 ## What it counts
 
-For every file matching an allowed extension, each non-empty, non-bracket-only
-line is counted as **comment**, **code**, or **test**:
+For every file matching an allowed extension, each line is counted into one of
+the enabled buckets:
 
 - Whole file is classified as **test** if its path or filename matches a test
   convention (see below).
 - Comment-only lines starting with `//`, `--`, `#`, or `'` are counted as
-  **comment** regardless of file path.
+  **comment** unless disabled with `-c` / `--no-comments`.
+- Blank lines are counted only with `-b` / `--blanks`.
+- Symbol-only lines are skipped by default; `-p` / `--count-symbols` counts
+  them as **code** or **test** depending on context.
 - For Rust files, lines inside `#[cfg(test)] mod <name> { ... }` blocks are
   counted as **test** regardless of path.
+- `-n` / `--no-split-tests` merges test lines into the main `LINES` column.
 
 ### Skipped lines
 
-A line is not counted when, after trimming, it is:
+By default, a line is not counted when, after trimming, it is:
 
 - empty, or
-- made up entirely of brackets (`{ } [ ] ( )`).
+- made up entirely of symbols or punctuation, such as `{ } [ ] ( )`.
 
 ### Test detection
 
@@ -71,16 +76,22 @@ nix run . -- --summary
 ## Usage
 
 ```
-sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-V] [-h]
+sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-n] [-c] [-b] [-p] [-V] [-h]
 
   -a, --add ext1,ext2     Include additional file extensions
   -e, --exclude ext1,ext2 Exclude specified file extensions
   -o, --only ext1,ext2    Include ONLY these extensions (overrides -a/-e)
   -d, --descending        Flat list sorted by total lines descending
   -s, --summary           Just print totals
+  -n, --no-split-tests    Merge test lines into the main code/lines column
+  -c, --no-comments       Exclude comment lines from counts and output
+  -b, --blanks            Show blank-line counts
+  -p, --count-symbols     Count symbol-only lines as code/test
   -V, --version           Show version
   -h, --help              Show help
 ```
+
+Short boolean flags can be combined, e.g. `-ncb`.
 
 ### File discovery
 

@@ -38,10 +38,11 @@ const FileCount = struct {
     ext: []const u8,
     test_count: u64,
     comment_count: u64,
+    blank_count: u64,
     code_count: u64,
 
     fn total(self: FileCount) u64 {
-        return self.test_count + self.comment_count + self.code_count;
+        return self.test_count + self.comment_count + self.blank_count + self.code_count;
     }
 };
 
@@ -51,8 +52,24 @@ const Options = struct {
     only: std.ArrayList([]const u8) = .empty,
     descending: bool = false,
     summary: bool = false,
+    split_tests: bool = true,
+    show_comments: bool = true,
+    show_blanks: bool = false,
+    count_symbol_only: bool = false,
     version: bool = false,
     help: bool = false,
+};
+
+const CountOptions = struct {
+    show_comments: bool = true,
+    show_blanks: bool = false,
+    count_symbol_only: bool = false,
+};
+
+const RenderOptions = struct {
+    split_tests: bool = true,
+    show_comments: bool = true,
+    show_blanks: bool = false,
 };
 
 const ArgError = error{ MissingValue, UnknownOption };
@@ -68,6 +85,14 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Options {
             opts.descending = true;
         } else if (std.mem.eql(u8, a, "-s") or std.mem.eql(u8, a, "--summary")) {
             opts.summary = true;
+        } else if (takeToggleFlag(a, "--split-tests", "--no-split-tests")) |v| {
+            opts.split_tests = v;
+        } else if (takeToggleFlag(a, "--comments", "--no-comments")) |v| {
+            opts.show_comments = v;
+        } else if (takeToggleFlag(a, "--blanks", "--no-blanks")) |v| {
+            opts.show_blanks = v;
+        } else if (takeToggleFlag(a, "--count-symbols", "--no-count-symbols")) |v| {
+            opts.count_symbol_only = v;
         } else if (std.mem.eql(u8, a, "-V") or std.mem.eql(u8, a, "--version")) {
             opts.version = true;
         } else if (try takeValueArg(argv, &i, a, "-a", "--add")) |v| {
@@ -76,7 +101,7 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Options {
             try opts.exclude.append(allocator, v);
         } else if (try takeValueArg(argv, &i, a, "-o", "--only")) |v| {
             try opts.only.append(allocator, v);
-        } else {
+        } else if (try takeShortFlagBundle(a, &opts)) {} else {
             std.debug.print("sloc: unknown option: {s}\n", .{a});
             return ArgError.UnknownOption;
         }
@@ -107,11 +132,43 @@ fn takeValueArg(
     return null;
 }
 
+fn takeToggleFlag(a: []const u8, positive: []const u8, negative: []const u8) ?bool {
+    if (std.mem.eql(u8, a, positive)) return true;
+    if (std.mem.eql(u8, a, negative)) return false;
+    return null;
+}
+
+fn applyShortFlag(flag: u8, opts: *Options) !void {
+    switch (flag) {
+        'h' => opts.help = true,
+        'd' => opts.descending = true,
+        's' => opts.summary = true,
+        'V' => opts.version = true,
+        'n' => opts.split_tests = false,
+        'c' => opts.show_comments = false,
+        'b' => opts.show_blanks = true,
+        'p' => opts.count_symbol_only = true,
+        else => return ArgError.UnknownOption,
+    }
+}
+
+fn takeShortFlagBundle(a: []const u8, opts: *Options) !bool {
+    if (a.len < 2 or a[0] != '-' or a[1] == '-') return false;
+    if (a[1] == 'a' or a[1] == 'e' or a[1] == 'o') return false;
+
+    for (a[1..]) |flag| try applyShortFlag(flag, opts);
+    return true;
+}
+
 fn printHelp(w: *std.Io.Writer) !void {
     try w.print("sloc {s}\n\n", .{build_options.version});
     try w.writeAll(
-        \\Usage: sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-V] [-h]
-        \\Count lines of code, comments, and tests, excluding blank and bracket-only lines.
+        \\Usage: sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-n] [-c] [-b] [-p]
+        \\            [--split-tests|--no-split-tests] [--comments|--no-comments]
+        \\            [--blanks|--no-blanks] [--count-symbols|--no-count-symbols]
+        \\            [-V] [-h]
+        \\Count code, test, and comment lines by default. Blank lines and symbol-only
+        \\lines are excluded unless enabled.
         \\
         \\Options:
         \\  -a, --add ext1,ext2     Include additional file extensions
@@ -119,8 +176,17 @@ fn printHelp(w: *std.Io.Writer) !void {
         \\  -o, --only ext1,ext2    Include ONLY the specified extensions (overrides -a and -e)
         \\  -d, --descending        Display results in descending order by line count
         \\  -s, --summary           Summary mode - only show totals
+        \\  -n, --no-split-tests    Merge test lines into the main code/lines column
+        \\  -c, --no-comments       Exclude comment lines from counts and output
+        \\  -b, --blanks            Show blank-line counts (default: off)
+        \\  -p, --count-symbols     Count symbol-only lines as code/test (default: off)
+        \\      --split-tests       Show separate code and test columns (default: on)
+        \\      --comments          Show comment-line counts (default: on)
+        \\      --no-blanks         Exclude blank lines from counts and output
+        \\      --no-count-symbols  Exclude symbol-only lines from counts
         \\  -V, --version           Display version information
         \\  -h, --help              Display this help message
+        \\                          Short flags can be combined, e.g. -ncb
         \\
         \\Test detection:
         \\  - Path patterns: tests/, test/, spec/, specs/, __tests__/, e2e/,
@@ -263,31 +329,28 @@ fn isWhitespaceByte(c: u8) bool {
 }
 
 const LineKind = enum {
-    skip,
+    blank,
     comment,
+    symbol,
     countable,
 };
 
+fn isSymbolOnlyTrimmed(trimmed: []const u8) bool {
+    for (trimmed) |c| {
+        if (c >= 128 or std.ascii.isAlphanumeric(c) or c == '_') return false;
+    }
+    return true;
+}
+
 fn classifyLine(line: []const u8) LineKind {
     const trimmed = std.mem.trim(u8, line, " \t\r");
-    if (trimmed.len == 0) return .skip;
-
-    var all_brackets = true;
-    for (trimmed) |c| {
-        switch (c) {
-            '{', '}', '[', ']', '(', ')' => {},
-            else => {
-                all_brackets = false;
-                break;
-            },
-        }
-    }
-    if (all_brackets) return .skip;
+    if (trimmed.len == 0) return .blank;
 
     if (trimmed.len >= 2 and trimmed[0] == '/' and trimmed[1] == '/') return .comment;
     if (trimmed.len >= 2 and trimmed[0] == '-' and trimmed[1] == '-') return .comment;
     if (trimmed[0] == '#') return .comment;
     if (trimmed[0] == '\'') return .comment;
+    if (isSymbolOnlyTrimmed(trimmed)) return .symbol;
 
     return .countable;
 }
@@ -333,12 +396,14 @@ fn containsTestModDecl(line: []const u8) bool {
 const LineCount = struct {
     test_count: u64,
     comment_count: u64,
+    blank_count: u64,
     code_count: u64,
 };
 
-fn countFile(content: []const u8, force_test: bool, rust_mode: bool) LineCount {
+fn countFile(content: []const u8, force_test: bool, rust_mode: bool, opts: CountOptions) LineCount {
     var tc: u64 = 0;
     var mc: u64 = 0;
+    var bc: u64 = 0;
     var cc: u64 = 0;
     var in_test = false;
     var depth: i64 = 0;
@@ -372,8 +437,17 @@ fn countFile(content: []const u8, force_test: bool, rust_mode: bool) LineCount {
         }
 
         switch (classifyLine(line)) {
-            .skip => {},
-            .comment => mc += 1,
+            .blank => {
+                if (opts.show_blanks) bc += 1;
+            },
+            .comment => {
+                if (opts.show_comments) mc += 1;
+            },
+            .symbol => {
+                if (opts.count_symbol_only) {
+                    if (force_test or in_test) tc += 1 else cc += 1;
+                }
+            },
             .countable => {
                 if (force_test or in_test) tc += 1 else cc += 1;
             },
@@ -385,7 +459,7 @@ fn countFile(content: []const u8, force_test: bool, rust_mode: bool) LineCount {
         }
     }
 
-    return .{ .test_count = tc, .comment_count = mc, .code_count = cc };
+    return .{ .test_count = tc, .comment_count = mc, .blank_count = bc, .code_count = cc };
 }
 
 fn runGit(
@@ -569,6 +643,54 @@ fn lessByTotalDesc(_: void, a: FileCount, b: FileCount) bool {
     return a.total() > b.total();
 }
 
+const DisplayCount = struct {
+    primary: u64,
+    test_c: u64,
+    comment: u64,
+    blank: u64,
+
+    fn total(self: DisplayCount) u64 {
+        return self.primary + self.test_c + self.comment + self.blank;
+    }
+};
+
+const ColumnWidths = struct {
+    primary: usize,
+    test_w: usize,
+    comment: usize,
+    blank: usize,
+};
+
+fn primaryLabel(opts: RenderOptions) []const u8 {
+    return if (opts.split_tests) "CODE" else "LINES";
+}
+
+fn makeDisplayCount(
+    code: u64,
+    test_count: u64,
+    comment: u64,
+    blank: u64,
+    opts: RenderOptions,
+) DisplayCount {
+    const shown_test = if (opts.split_tests) test_count else 0;
+    const shown_comment = if (opts.show_comments) comment else 0;
+    const shown_blank = if (opts.show_blanks) blank else 0;
+    return .{
+        .primary = code + if (opts.split_tests) 0 else test_count,
+        .test_c = shown_test,
+        .comment = shown_comment,
+        .blank = shown_blank,
+    };
+}
+
+fn visibleColumnWidth(widths: ColumnWidths, opts: RenderOptions) usize {
+    var width = widths.primary;
+    if (opts.split_tests) width += 2 + widths.test_w;
+    if (opts.show_comments) width += 2 + widths.comment;
+    if (opts.show_blanks) width += 2 + widths.blank;
+    return width;
+}
+
 // ---------- styling ----------
 
 const Color = struct {
@@ -645,6 +767,20 @@ fn writeCommentNum(w: *std.Io.Writer, n: u64, width: usize, color: Color) !void 
     }
 }
 
+fn writeBlankNum(w: *std.Io.Writer, n: u64, width: usize, color: Color) !void {
+    const cw = commaWidth(n);
+    if (width > cw) try padSpaces(w, width - cw);
+    if (n == 0) {
+        try w.writeAll(color.dim);
+        try w.writeByte('0');
+        try w.writeAll(color.reset);
+    } else {
+        try w.writeAll(color.cyan);
+        try writeCommaU64(w, n);
+        try w.writeAll(color.reset);
+    }
+}
+
 fn writePlainPadded(w: *std.Io.Writer, n: u64, width: usize) !void {
     const cw = commaWidth(n);
     if (width > cw) try padSpaces(w, width - cw);
@@ -686,6 +822,70 @@ fn writeBar(w: *std.Io.Writer, n: u64, max: u64, width: usize, color: Color) !vo
     try w.writeAll(color.reset);
 }
 
+fn writeVisibleHeaders(
+    w: *std.Io.Writer,
+    widths: ColumnWidths,
+    opts: RenderOptions,
+    color: Color,
+) !void {
+    try writeRightHeader(w, primaryLabel(opts), widths.primary, color);
+    if (opts.split_tests) {
+        try w.writeAll("  ");
+        try writeRightHeader(w, "TEST", widths.test_w, color);
+    }
+    if (opts.show_comments) {
+        try w.writeAll("  ");
+        try writeRightHeader(w, "COMMENT", widths.comment, color);
+    }
+    if (opts.show_blanks) {
+        try w.writeAll("  ");
+        try writeRightHeader(w, "BLANK", widths.blank, color);
+    }
+}
+
+fn writeVisibleNums(
+    w: *std.Io.Writer,
+    counts: DisplayCount,
+    widths: ColumnWidths,
+    opts: RenderOptions,
+    color: Color,
+) !void {
+    try writeCodeNum(w, counts.primary, widths.primary, color);
+    if (opts.split_tests) {
+        try w.writeAll("  ");
+        try writeTestNum(w, counts.test_c, widths.test_w, color);
+    }
+    if (opts.show_comments) {
+        try w.writeAll("  ");
+        try writeCommentNum(w, counts.comment, widths.comment, color);
+    }
+    if (opts.show_blanks) {
+        try w.writeAll("  ");
+        try writeBlankNum(w, counts.blank, widths.blank, color);
+    }
+}
+
+fn writeVisiblePlainNums(
+    w: *std.Io.Writer,
+    counts: DisplayCount,
+    widths: ColumnWidths,
+    opts: RenderOptions,
+) !void {
+    try writePlainPadded(w, counts.primary, widths.primary);
+    if (opts.split_tests) {
+        try w.writeAll("  ");
+        try writePlainPadded(w, counts.test_c, widths.test_w);
+    }
+    if (opts.show_comments) {
+        try w.writeAll("  ");
+        try writePlainPadded(w, counts.comment, widths.comment);
+    }
+    if (opts.show_blanks) {
+        try w.writeAll("  ");
+        try writePlainPadded(w, counts.blank, widths.blank);
+    }
+}
+
 // ---------- tree ----------
 
 const Node = struct {
@@ -694,10 +894,11 @@ const Node = struct {
     code: u64,
     test_c: u64,
     comment_c: u64,
+    blank_c: u64,
     children: std.ArrayList(*Node),
 
     fn total(self: *const Node) u64 {
-        return self.code + self.test_c + self.comment_c;
+        return self.code + self.test_c + self.comment_c + self.blank_c;
     }
 };
 
@@ -713,6 +914,7 @@ fn newNode(
         .code = 0,
         .test_c = 0,
         .comment_c = 0,
+        .blank_c = 0,
         .children = .empty,
     };
     return n;
@@ -738,6 +940,7 @@ fn buildTree(allocator: std.mem.Allocator, files: []const FileCount) !*Node {
         root.code += f.code_count;
         root.test_c += f.test_count;
         root.comment_c += f.comment_count;
+        root.blank_c += f.blank_count;
 
         var cursor = root;
         var it = std.mem.splitScalar(u8, f.path, '/');
@@ -749,6 +952,7 @@ fn buildTree(allocator: std.mem.Allocator, files: []const FileCount) !*Node {
             node.code += f.code_count;
             node.test_c += f.test_count;
             node.comment_c += f.comment_count;
+            node.blank_c += f.blank_count;
             cursor = node;
             part_opt = next;
         }
@@ -785,16 +989,12 @@ fn printTree(
     prefix: []const u8,
     is_last: bool,
     is_root: bool,
-    max_c: usize,
-    max_t: usize,
-    max_m: usize,
+    widths: ColumnWidths,
+    opts: RenderOptions,
     color: Color,
 ) !void {
-    try writeCodeNum(w, node.code, max_c, color);
-    try w.writeAll("  ");
-    try writeTestNum(w, node.test_c, max_t, color);
-    try w.writeAll("  ");
-    try writeCommentNum(w, node.comment_c, max_m, color);
+    const counts = makeDisplayCount(node.code, node.test_c, node.comment_c, node.blank_c, opts);
+    try writeVisibleNums(w, counts, widths, opts, color);
     try w.writeAll("  ");
 
     if (is_root) {
@@ -827,7 +1027,7 @@ fn printTree(
 
     for (node.children.items, 0..) |child, i| {
         const child_last = (i == node.children.items.len - 1);
-        try printTree(w, allocator, child, new_prefix, child_last, false, max_c, max_t, max_m, color);
+        try printTree(w, allocator, child, new_prefix, child_last, false, widths, opts, color);
     }
 }
 
@@ -838,9 +1038,10 @@ const ExtRow = struct {
     code: u64,
     test_c: u64,
     comment_c: u64,
+    blank_c: u64,
 
     fn total(self: ExtRow) u64 {
-        return self.code + self.test_c + self.comment_c;
+        return self.code + self.test_c + self.comment_c + self.blank_c;
     }
 };
 
@@ -851,7 +1052,9 @@ fn printExtensionTable(
     total_code: u64,
     total_test: u64,
     total_comment: u64,
+    total_blank: u64,
     descending: bool,
+    opts: RenderOptions,
     color: Color,
 ) !void {
     const exts = try uniqExtensions(allocator, files);
@@ -860,13 +1063,15 @@ fn printExtensionTable(
         var ec: u64 = 0;
         var et: u64 = 0;
         var em: u64 = 0;
+        var eb: u64 = 0;
         for (files) |f| {
             if (!asciiEqlIgnoreCase(f.ext, e)) continue;
             ec += f.code_count;
             et += f.test_count;
             em += f.comment_count;
+            eb += f.blank_count;
         }
-        rows[i] = .{ .ext = e, .code = ec, .test_c = et, .comment_c = em };
+        rows[i] = .{ .ext = e, .code = ec, .test_c = et, .comment_c = em, .blank_c = eb };
     }
 
     if (descending) {
@@ -884,40 +1089,42 @@ fn printExtensionTable(
         }.lt);
     }
 
-    var max_c: usize = @max(commaWidth(total_code), 4);
-    var max_t: usize = @max(commaWidth(total_test), 4);
-    var max_m: usize = @max(commaWidth(total_comment), 7);
+    const total_counts = makeDisplayCount(total_code, total_test, total_comment, total_blank, opts);
+    var widths = ColumnWidths{
+        .primary = @max(commaWidth(total_counts.primary), primaryLabel(opts).len),
+        .test_w = @max(commaWidth(total_counts.test_c), 4),
+        .comment = @max(commaWidth(total_counts.comment), 7),
+        .blank = @max(commaWidth(total_counts.blank), 5),
+    };
     var max_ext: usize = 4; // "TYPE"
     for (rows) |r| {
-        max_c = @max(max_c, commaWidth(r.code));
-        max_t = @max(max_t, commaWidth(r.test_c));
-        max_m = @max(max_m, commaWidth(r.comment_c));
+        const counts = makeDisplayCount(r.code, r.test_c, r.comment_c, r.blank_c, opts);
+        widths.primary = @max(widths.primary, commaWidth(counts.primary));
+        widths.test_w = @max(widths.test_w, commaWidth(counts.test_c));
+        widths.comment = @max(widths.comment, commaWidth(counts.comment));
+        widths.blank = @max(widths.blank, commaWidth(counts.blank));
         max_ext = @max(max_ext, r.ext.len + 1); // +1 for leading '.'
     }
     const bar_width: usize = 20;
 
     var max_total: u64 = 0;
-    for (rows) |r| max_total = @max(max_total, r.total());
+    for (rows) |r| {
+        const counts = makeDisplayCount(r.code, r.test_c, r.comment_c, r.blank_c, opts);
+        max_total = @max(max_total, counts.total());
+    }
 
     // Header row
-    try writeRightHeader(w, "CODE", max_c, color);
-    try w.writeAll("  ");
-    try writeRightHeader(w, "TEST", max_t, color);
-    try w.writeAll("  ");
-    try writeRightHeader(w, "COMMENT", max_m, color);
+    try writeVisibleHeaders(w, widths, opts, color);
     try w.writeAll("  ");
     try writeLeftHeader(w, "TYPE", color);
     try w.writeByte('\n');
 
-    const header_rule_width = max_c + 2 + max_t + 2 + max_m + 2 + max_ext + 1 + bar_width;
+    const header_rule_width = visibleColumnWidth(widths, opts) + 2 + max_ext + 1 + bar_width;
     try writeRule(w, header_rule_width, color);
 
     for (rows) |r| {
-        try writeCodeNum(w, r.code, max_c, color);
-        try w.writeAll("  ");
-        try writeTestNum(w, r.test_c, max_t, color);
-        try w.writeAll("  ");
-        try writeCommentNum(w, r.comment_c, max_m, color);
+        const counts = makeDisplayCount(r.code, r.test_c, r.comment_c, r.blank_c, opts);
+        try writeVisibleNums(w, counts, widths, opts, color);
         try w.writeAll("  ");
         try w.writeAll(color.dim);
         try w.writeByte('.');
@@ -930,14 +1137,10 @@ fn printExtensionTable(
         try w.writeByte('\n');
     }
 
-    try writeRule(w, max_c + 2 + max_t + 2 + max_m, color);
+    try writeRule(w, visibleColumnWidth(widths, opts), color);
 
     try w.writeAll(color.bold);
-    try writePlainPadded(w, total_code, max_c);
-    try w.writeAll("  ");
-    try writePlainPadded(w, total_test, max_t);
-    try w.writeAll("  ");
-    try writePlainPadded(w, total_comment, max_m);
+    try writeVisiblePlainNums(w, total_counts, widths, opts);
     try w.writeAll("  TOTAL");
     try w.writeAll(color.reset);
     try w.writeByte('\n');
@@ -978,6 +1181,16 @@ pub fn main() !void {
     }
 
     const color = Color.init(colorEnabled(allocator));
+    const count_opts = CountOptions{
+        .show_comments = opts.show_comments,
+        .show_blanks = opts.show_blanks,
+        .count_symbol_only = opts.count_symbol_only,
+    };
+    const render_opts = RenderOptions{
+        .split_tests = opts.split_tests,
+        .show_comments = opts.show_comments,
+        .show_blanks = opts.show_blanks,
+    };
 
     const allowed = try buildAllowedExts(allocator, &opts);
 
@@ -993,6 +1206,7 @@ pub fn main() !void {
     var total_code: u64 = 0;
     var total_test: u64 = 0;
     var total_comment: u64 = 0;
+    var total_blank: u64 = 0;
 
     for (files_raw.items) |path| {
         const content = std.fs.cwd().readFileAlloc(allocator, path, 128 * 1024 * 1024) catch continue;
@@ -1001,15 +1215,17 @@ pub fn main() !void {
         const is_rust = blk: {
             break :blk asciiEqlIgnoreCase(matched_ext, "rs");
         };
-        const c = countFile(content, force_test, is_rust);
+        const c = countFile(content, force_test, is_rust, count_opts);
         total_code += c.code_count;
         total_test += c.test_count;
         total_comment += c.comment_count;
+        total_blank += c.blank_count;
         try files.append(allocator, .{
             .path = path,
             .ext = matched_ext,
             .test_count = c.test_count,
             .comment_count = c.comment_count,
+            .blank_count = c.blank_count,
             .code_count = c.code_count,
         });
     }
@@ -1021,31 +1237,29 @@ pub fn main() !void {
     }
 
     if (!opts.summary) {
-        var max_c: usize = @max(commaWidth(total_code), 4);
-        var max_t: usize = @max(commaWidth(total_test), 4);
-        var max_m: usize = @max(commaWidth(total_comment), 7);
+        const total_counts = makeDisplayCount(total_code, total_test, total_comment, total_blank, render_opts);
+        var widths = ColumnWidths{
+            .primary = @max(commaWidth(total_counts.primary), primaryLabel(render_opts).len),
+            .test_w = @max(commaWidth(total_counts.test_c), 4),
+            .comment = @max(commaWidth(total_counts.comment), 7),
+            .blank = @max(commaWidth(total_counts.blank), 5),
+        };
         for (files.items) |f| {
-            max_c = @max(max_c, commaWidth(f.code_count));
-            max_t = @max(max_t, commaWidth(f.test_count));
-            max_m = @max(max_m, commaWidth(f.comment_count));
+            const counts = makeDisplayCount(f.code_count, f.test_count, f.comment_count, f.blank_count, render_opts);
+            widths.primary = @max(widths.primary, commaWidth(counts.primary));
+            widths.test_w = @max(widths.test_w, commaWidth(counts.test_c));
+            widths.comment = @max(widths.comment, commaWidth(counts.comment));
+            widths.blank = @max(widths.blank, commaWidth(counts.blank));
         }
 
-        try writeRightHeader(stdout, "CODE", max_c, color);
-        try stdout.writeAll("  ");
-        try writeRightHeader(stdout, "TEST", max_t, color);
-        try stdout.writeAll("  ");
-        try writeRightHeader(stdout, "COMMENT", max_m, color);
+        try writeVisibleHeaders(stdout, widths, render_opts, color);
         try stdout.writeAll("  ");
         try writeLeftHeader(stdout, "PATH", color);
         try stdout.writeByte('\n');
-        try writeRule(stdout, max_c + 2 + max_t + 2 + max_m + 2 + 32, color);
+        try writeRule(stdout, visibleColumnWidth(widths, render_opts) + 2 + 32, color);
 
         if (opts.descending) {
-            try writeCodeNum(stdout, total_code, max_c, color);
-            try stdout.writeAll("  ");
-            try writeTestNum(stdout, total_test, max_t, color);
-            try stdout.writeAll("  ");
-            try writeCommentNum(stdout, total_comment, max_m, color);
+            try writeVisibleNums(stdout, total_counts, widths, render_opts, color);
             try stdout.writeAll("  ");
             try stdout.writeAll(color.bold);
             try stdout.writeAll(".");
@@ -1056,11 +1270,8 @@ pub fn main() !void {
             @memcpy(sorted, files.items);
             std.mem.sort(FileCount, sorted, {}, lessByTotalDesc);
             for (sorted) |f| {
-                try writeCodeNum(stdout, f.code_count, max_c, color);
-                try stdout.writeAll("  ");
-                try writeTestNum(stdout, f.test_count, max_t, color);
-                try stdout.writeAll("  ");
-                try writeCommentNum(stdout, f.comment_count, max_m, color);
+                const counts = makeDisplayCount(f.code_count, f.test_count, f.comment_count, f.blank_count, render_opts);
+                try writeVisibleNums(stdout, counts, widths, render_opts, color);
                 try stdout.writeAll("  ");
                 if (isTestPath(f.path)) {
                     try stdout.writeAll(color.yellow);
@@ -1074,7 +1285,7 @@ pub fn main() !void {
         } else {
             const root = try buildTree(allocator, files.items);
             sortTreeAlpha(root);
-            try printTree(stdout, allocator, root, "", false, true, max_c, max_t, max_m, color);
+            try printTree(stdout, allocator, root, "", false, true, widths, render_opts, color);
         }
         try stdout.writeByte('\n');
     }
@@ -1086,7 +1297,9 @@ pub fn main() !void {
         total_code,
         total_test,
         total_comment,
+        total_blank,
         opts.descending,
+        render_opts,
         color,
     );
 
@@ -1146,10 +1359,10 @@ test "splitCommaAppend - strips leading dot" {
 }
 
 test "classifyLine" {
-    try std.testing.expectEqual(LineKind.skip, classifyLine(""));
-    try std.testing.expectEqual(LineKind.skip, classifyLine("   "));
-    try std.testing.expectEqual(LineKind.skip, classifyLine("  { "));
-    try std.testing.expectEqual(LineKind.skip, classifyLine("})"));
+    try std.testing.expectEqual(LineKind.blank, classifyLine(""));
+    try std.testing.expectEqual(LineKind.blank, classifyLine("   "));
+    try std.testing.expectEqual(LineKind.symbol, classifyLine("  { "));
+    try std.testing.expectEqual(LineKind.symbol, classifyLine("})"));
     try std.testing.expectEqual(LineKind.comment, classifyLine("// comment"));
     try std.testing.expectEqual(LineKind.comment, classifyLine("  -- haskell comment"));
     try std.testing.expectEqual(LineKind.comment, classifyLine("# python"));
@@ -1167,9 +1380,10 @@ test "countFile - basic" {
         \\let y = 2;
         \\}
     ;
-    const r = countFile(src, false, false);
+    const r = countFile(src, false, false, .{});
     try std.testing.expectEqual(@as(u64, 0), r.test_count);
     try std.testing.expectEqual(@as(u64, 1), r.comment_count);
+    try std.testing.expectEqual(@as(u64, 0), r.blank_count);
     try std.testing.expectEqual(@as(u64, 2), r.code_count);
 }
 
@@ -1185,17 +1399,44 @@ test "countFile - rust cfg test" {
         \\
         \\fn more() { 2 }
     ;
-    const r = countFile(src, false, true);
+    const r = countFile(src, false, true, .{});
     try std.testing.expect(r.code_count >= 2);
     try std.testing.expect(r.test_count >= 2);
 }
 
 test "countFile - force_test" {
     const src = "// note\nlet x = 1;\nlet y = 2;\n";
-    const r = countFile(src, true, false);
+    const r = countFile(src, true, false, .{});
     try std.testing.expectEqual(@as(u64, 2), r.test_count);
     try std.testing.expectEqual(@as(u64, 1), r.comment_count);
+    try std.testing.expectEqual(@as(u64, 0), r.blank_count);
     try std.testing.expectEqual(@as(u64, 0), r.code_count);
+}
+
+test "countFile - blank and symbol toggles" {
+    const src =
+        \\
+        \\{
+        \\let x = 1;
+    ;
+
+    const default_r = countFile(src, false, false, .{});
+    try std.testing.expectEqual(@as(u64, 0), default_r.blank_count);
+    try std.testing.expectEqual(@as(u64, 1), default_r.code_count);
+
+    const full_r = countFile(src, false, false, .{
+        .show_blanks = true,
+        .count_symbol_only = true,
+    });
+    try std.testing.expectEqual(@as(u64, 1), full_r.blank_count);
+    try std.testing.expectEqual(@as(u64, 2), full_r.code_count);
+}
+
+test "countFile - no comments" {
+    const src = "// note\nlet x = 1;\n";
+    const r = countFile(src, false, false, .{ .show_comments = false });
+    try std.testing.expectEqual(@as(u64, 0), r.comment_count);
+    try std.testing.expectEqual(@as(u64, 1), r.code_count);
 }
 
 test "commaWidth and writeCommaU64" {
@@ -1210,4 +1451,13 @@ test "parseArgs - version flag" {
     const argv = [_][]const u8{ "sloc", "--version" };
     const opts = try parseArgs(std.testing.allocator, &argv);
     try std.testing.expect(opts.version);
+}
+
+test "parseArgs - count toggles and short bundle" {
+    const argv = [_][]const u8{ "sloc", "-ncbp", "--comments" };
+    const opts = try parseArgs(std.testing.allocator, &argv);
+    try std.testing.expect(!opts.split_tests);
+    try std.testing.expect(opts.show_comments);
+    try std.testing.expect(opts.show_blanks);
+    try std.testing.expect(opts.count_symbol_only);
 }
