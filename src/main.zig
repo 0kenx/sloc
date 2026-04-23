@@ -37,10 +37,11 @@ const FileCount = struct {
     path: []const u8,
     ext: []const u8,
     test_count: u64,
+    comment_count: u64,
     code_count: u64,
 
     fn total(self: FileCount) u64 {
-        return self.test_count + self.code_count;
+        return self.test_count + self.comment_count + self.code_count;
     }
 };
 
@@ -110,7 +111,7 @@ fn printHelp(w: *std.Io.Writer) !void {
     try w.print("sloc {s}\n\n", .{build_options.version});
     try w.writeAll(
         \\Usage: sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-V] [-h]
-        \\Count lines of code and tests, excluding blanks, bracket-only lines, and comments.
+        \\Count lines of code, comments, and tests, excluding blank and bracket-only lines.
         \\
         \\Options:
         \\  -a, --add ext1,ext2     Include additional file extensions
@@ -261,9 +262,15 @@ fn isWhitespaceByte(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\r';
 }
 
-fn isSkippedLine(line: []const u8) bool {
+const LineKind = enum {
+    skip,
+    comment,
+    countable,
+};
+
+fn classifyLine(line: []const u8) LineKind {
     const trimmed = std.mem.trim(u8, line, " \t\r");
-    if (trimmed.len == 0) return true;
+    if (trimmed.len == 0) return .skip;
 
     var all_brackets = true;
     for (trimmed) |c| {
@@ -275,14 +282,14 @@ fn isSkippedLine(line: []const u8) bool {
             },
         }
     }
-    if (all_brackets) return true;
+    if (all_brackets) return .skip;
 
-    if (trimmed.len >= 2 and trimmed[0] == '/' and trimmed[1] == '/') return true;
-    if (trimmed.len >= 2 and trimmed[0] == '-' and trimmed[1] == '-') return true;
-    if (trimmed[0] == '#') return true;
-    if (trimmed[0] == '\'') return true;
+    if (trimmed.len >= 2 and trimmed[0] == '/' and trimmed[1] == '/') return .comment;
+    if (trimmed.len >= 2 and trimmed[0] == '-' and trimmed[1] == '-') return .comment;
+    if (trimmed[0] == '#') return .comment;
+    if (trimmed[0] == '\'') return .comment;
 
-    return false;
+    return .countable;
 }
 
 fn isCfgContinuation(line: []const u8) bool {
@@ -323,10 +330,15 @@ fn containsTestModDecl(line: []const u8) bool {
     return false;
 }
 
-const LineCount = struct { test_count: u64, code_count: u64 };
+const LineCount = struct {
+    test_count: u64,
+    comment_count: u64,
+    code_count: u64,
+};
 
 fn countFile(content: []const u8, force_test: bool, rust_mode: bool) LineCount {
     var tc: u64 = 0;
+    var mc: u64 = 0;
     var cc: u64 = 0;
     var in_test = false;
     var depth: i64 = 0;
@@ -359,8 +371,12 @@ fn countFile(content: []const u8, force_test: bool, rust_mode: bool) LineCount {
             }
         }
 
-        if (!isSkippedLine(line)) {
-            if (force_test or in_test) tc += 1 else cc += 1;
+        switch (classifyLine(line)) {
+            .skip => {},
+            .comment => mc += 1,
+            .countable => {
+                if (force_test or in_test) tc += 1 else cc += 1;
+            },
         }
 
         if (in_test and depth <= 0) {
@@ -369,7 +385,7 @@ fn countFile(content: []const u8, force_test: bool, rust_mode: bool) LineCount {
         }
     }
 
-    return .{ .test_count = tc, .code_count = cc };
+    return .{ .test_count = tc, .comment_count = mc, .code_count = cc };
 }
 
 fn runGit(
@@ -615,6 +631,20 @@ fn writeTestNum(w: *std.Io.Writer, n: u64, width: usize, color: Color) !void {
     }
 }
 
+fn writeCommentNum(w: *std.Io.Writer, n: u64, width: usize, color: Color) !void {
+    const cw = commaWidth(n);
+    if (width > cw) try padSpaces(w, width - cw);
+    if (n == 0) {
+        try w.writeAll(color.dim);
+        try w.writeByte('0');
+        try w.writeAll(color.reset);
+    } else {
+        try w.writeAll(color.magenta);
+        try writeCommaU64(w, n);
+        try w.writeAll(color.reset);
+    }
+}
+
 fn writePlainPadded(w: *std.Io.Writer, n: u64, width: usize) !void {
     const cw = commaWidth(n);
     if (width > cw) try padSpaces(w, width - cw);
@@ -663,10 +693,11 @@ const Node = struct {
     is_dir: bool,
     code: u64,
     test_c: u64,
+    comment_c: u64,
     children: std.ArrayList(*Node),
 
     fn total(self: *const Node) u64 {
-        return self.code + self.test_c;
+        return self.code + self.test_c + self.comment_c;
     }
 };
 
@@ -681,6 +712,7 @@ fn newNode(
         .is_dir = is_dir,
         .code = 0,
         .test_c = 0,
+        .comment_c = 0,
         .children = .empty,
     };
     return n;
@@ -705,6 +737,7 @@ fn buildTree(allocator: std.mem.Allocator, files: []const FileCount) !*Node {
     for (files) |f| {
         root.code += f.code_count;
         root.test_c += f.test_count;
+        root.comment_c += f.comment_count;
 
         var cursor = root;
         var it = std.mem.splitScalar(u8, f.path, '/');
@@ -715,6 +748,7 @@ fn buildTree(allocator: std.mem.Allocator, files: []const FileCount) !*Node {
             const node = try getOrCreateChild(allocator, cursor, part, !is_file);
             node.code += f.code_count;
             node.test_c += f.test_count;
+            node.comment_c += f.comment_count;
             cursor = node;
             part_opt = next;
         }
@@ -753,11 +787,14 @@ fn printTree(
     is_root: bool,
     max_c: usize,
     max_t: usize,
+    max_m: usize,
     color: Color,
 ) !void {
     try writeCodeNum(w, node.code, max_c, color);
     try w.writeAll("  ");
     try writeTestNum(w, node.test_c, max_t, color);
+    try w.writeAll("  ");
+    try writeCommentNum(w, node.comment_c, max_m, color);
     try w.writeAll("  ");
 
     if (is_root) {
@@ -790,7 +827,7 @@ fn printTree(
 
     for (node.children.items, 0..) |child, i| {
         const child_last = (i == node.children.items.len - 1);
-        try printTree(w, allocator, child, new_prefix, child_last, false, max_c, max_t, color);
+        try printTree(w, allocator, child, new_prefix, child_last, false, max_c, max_t, max_m, color);
     }
 }
 
@@ -800,9 +837,10 @@ const ExtRow = struct {
     ext: []const u8,
     code: u64,
     test_c: u64,
+    comment_c: u64,
 
     fn total(self: ExtRow) u64 {
-        return self.code + self.test_c;
+        return self.code + self.test_c + self.comment_c;
     }
 };
 
@@ -812,6 +850,7 @@ fn printExtensionTable(
     files: []const FileCount,
     total_code: u64,
     total_test: u64,
+    total_comment: u64,
     descending: bool,
     color: Color,
 ) !void {
@@ -820,12 +859,14 @@ fn printExtensionTable(
     for (exts.items, 0..) |e, i| {
         var ec: u64 = 0;
         var et: u64 = 0;
+        var em: u64 = 0;
         for (files) |f| {
             if (!asciiEqlIgnoreCase(f.ext, e)) continue;
             ec += f.code_count;
             et += f.test_count;
+            em += f.comment_count;
         }
-        rows[i] = .{ .ext = e, .code = ec, .test_c = et };
+        rows[i] = .{ .ext = e, .code = ec, .test_c = et, .comment_c = em };
     }
 
     if (descending) {
@@ -845,10 +886,12 @@ fn printExtensionTable(
 
     var max_c: usize = @max(commaWidth(total_code), 4);
     var max_t: usize = @max(commaWidth(total_test), 4);
+    var max_m: usize = @max(commaWidth(total_comment), 7);
     var max_ext: usize = 4; // "TYPE"
     for (rows) |r| {
         max_c = @max(max_c, commaWidth(r.code));
         max_t = @max(max_t, commaWidth(r.test_c));
+        max_m = @max(max_m, commaWidth(r.comment_c));
         max_ext = @max(max_ext, r.ext.len + 1); // +1 for leading '.'
     }
     const bar_width: usize = 20;
@@ -861,16 +904,20 @@ fn printExtensionTable(
     try w.writeAll("  ");
     try writeRightHeader(w, "TEST", max_t, color);
     try w.writeAll("  ");
+    try writeRightHeader(w, "COMMENT", max_m, color);
+    try w.writeAll("  ");
     try writeLeftHeader(w, "TYPE", color);
     try w.writeByte('\n');
 
-    const header_rule_width = max_c + 2 + max_t + 2 + max_ext + 1 + bar_width;
+    const header_rule_width = max_c + 2 + max_t + 2 + max_m + 2 + max_ext + 1 + bar_width;
     try writeRule(w, header_rule_width, color);
 
     for (rows) |r| {
         try writeCodeNum(w, r.code, max_c, color);
         try w.writeAll("  ");
         try writeTestNum(w, r.test_c, max_t, color);
+        try w.writeAll("  ");
+        try writeCommentNum(w, r.comment_c, max_m, color);
         try w.writeAll("  ");
         try w.writeAll(color.dim);
         try w.writeByte('.');
@@ -883,12 +930,14 @@ fn printExtensionTable(
         try w.writeByte('\n');
     }
 
-    try writeRule(w, max_c + 2 + max_t, color);
+    try writeRule(w, max_c + 2 + max_t + 2 + max_m, color);
 
     try w.writeAll(color.bold);
     try writePlainPadded(w, total_code, max_c);
     try w.writeAll("  ");
     try writePlainPadded(w, total_test, max_t);
+    try w.writeAll("  ");
+    try writePlainPadded(w, total_comment, max_m);
     try w.writeAll("  TOTAL");
     try w.writeAll(color.reset);
     try w.writeByte('\n');
@@ -943,6 +992,7 @@ pub fn main() !void {
     var files: std.ArrayList(FileCount) = .empty;
     var total_code: u64 = 0;
     var total_test: u64 = 0;
+    var total_comment: u64 = 0;
 
     for (files_raw.items) |path| {
         const content = std.fs.cwd().readFileAlloc(allocator, path, 128 * 1024 * 1024) catch continue;
@@ -954,10 +1004,12 @@ pub fn main() !void {
         const c = countFile(content, force_test, is_rust);
         total_code += c.code_count;
         total_test += c.test_count;
+        total_comment += c.comment_count;
         try files.append(allocator, .{
             .path = path,
             .ext = matched_ext,
             .test_count = c.test_count,
+            .comment_count = c.comment_count,
             .code_count = c.code_count,
         });
     }
@@ -971,23 +1023,29 @@ pub fn main() !void {
     if (!opts.summary) {
         var max_c: usize = @max(commaWidth(total_code), 4);
         var max_t: usize = @max(commaWidth(total_test), 4);
+        var max_m: usize = @max(commaWidth(total_comment), 7);
         for (files.items) |f| {
             max_c = @max(max_c, commaWidth(f.code_count));
             max_t = @max(max_t, commaWidth(f.test_count));
+            max_m = @max(max_m, commaWidth(f.comment_count));
         }
 
         try writeRightHeader(stdout, "CODE", max_c, color);
         try stdout.writeAll("  ");
         try writeRightHeader(stdout, "TEST", max_t, color);
         try stdout.writeAll("  ");
+        try writeRightHeader(stdout, "COMMENT", max_m, color);
+        try stdout.writeAll("  ");
         try writeLeftHeader(stdout, "PATH", color);
         try stdout.writeByte('\n');
-        try writeRule(stdout, max_c + 2 + max_t + 2 + 32, color);
+        try writeRule(stdout, max_c + 2 + max_t + 2 + max_m + 2 + 32, color);
 
         if (opts.descending) {
             try writeCodeNum(stdout, total_code, max_c, color);
             try stdout.writeAll("  ");
             try writeTestNum(stdout, total_test, max_t, color);
+            try stdout.writeAll("  ");
+            try writeCommentNum(stdout, total_comment, max_m, color);
             try stdout.writeAll("  ");
             try stdout.writeAll(color.bold);
             try stdout.writeAll(".");
@@ -1002,6 +1060,8 @@ pub fn main() !void {
                 try stdout.writeAll("  ");
                 try writeTestNum(stdout, f.test_count, max_t, color);
                 try stdout.writeAll("  ");
+                try writeCommentNum(stdout, f.comment_count, max_m, color);
+                try stdout.writeAll("  ");
                 if (isTestPath(f.path)) {
                     try stdout.writeAll(color.yellow);
                     try stdout.writeAll(f.path);
@@ -1014,7 +1074,7 @@ pub fn main() !void {
         } else {
             const root = try buildTree(allocator, files.items);
             sortTreeAlpha(root);
-            try printTree(stdout, allocator, root, "", false, true, max_c, max_t, color);
+            try printTree(stdout, allocator, root, "", false, true, max_c, max_t, max_m, color);
         }
         try stdout.writeByte('\n');
     }
@@ -1025,6 +1085,7 @@ pub fn main() !void {
         files.items,
         total_code,
         total_test,
+        total_comment,
         opts.descending,
         color,
     );
@@ -1084,17 +1145,17 @@ test "splitCommaAppend - strips leading dot" {
     try std.testing.expectEqualStrings("RS", list.items[2]);
 }
 
-test "isSkippedLine" {
-    try std.testing.expect(isSkippedLine(""));
-    try std.testing.expect(isSkippedLine("   "));
-    try std.testing.expect(isSkippedLine("  { "));
-    try std.testing.expect(isSkippedLine("})"));
-    try std.testing.expect(isSkippedLine("// comment"));
-    try std.testing.expect(isSkippedLine("  -- haskell comment"));
-    try std.testing.expect(isSkippedLine("# python"));
-    try std.testing.expect(isSkippedLine("' fish"));
-    try std.testing.expect(!isSkippedLine("let x = 1;"));
-    try std.testing.expect(!isSkippedLine("function foo() {"));
+test "classifyLine" {
+    try std.testing.expectEqual(LineKind.skip, classifyLine(""));
+    try std.testing.expectEqual(LineKind.skip, classifyLine("   "));
+    try std.testing.expectEqual(LineKind.skip, classifyLine("  { "));
+    try std.testing.expectEqual(LineKind.skip, classifyLine("})"));
+    try std.testing.expectEqual(LineKind.comment, classifyLine("// comment"));
+    try std.testing.expectEqual(LineKind.comment, classifyLine("  -- haskell comment"));
+    try std.testing.expectEqual(LineKind.comment, classifyLine("# python"));
+    try std.testing.expectEqual(LineKind.comment, classifyLine("' fish"));
+    try std.testing.expectEqual(LineKind.countable, classifyLine("let x = 1;"));
+    try std.testing.expectEqual(LineKind.countable, classifyLine("function foo() {"));
 }
 
 test "countFile - basic" {
@@ -1108,6 +1169,7 @@ test "countFile - basic" {
     ;
     const r = countFile(src, false, false);
     try std.testing.expectEqual(@as(u64, 0), r.test_count);
+    try std.testing.expectEqual(@as(u64, 1), r.comment_count);
     try std.testing.expectEqual(@as(u64, 2), r.code_count);
 }
 
@@ -1129,9 +1191,10 @@ test "countFile - rust cfg test" {
 }
 
 test "countFile - force_test" {
-    const src = "let x = 1;\nlet y = 2;\n";
+    const src = "// note\nlet x = 1;\nlet y = 2;\n";
     const r = countFile(src, true, false);
     try std.testing.expectEqual(@as(u64, 2), r.test_count);
+    try std.testing.expectEqual(@as(u64, 1), r.comment_count);
     try std.testing.expectEqual(@as(u64, 0), r.code_count);
 }
 

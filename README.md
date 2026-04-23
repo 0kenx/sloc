@@ -1,18 +1,20 @@
 # sloc
 
-A fast, standalone source-lines-of-code counter that splits counts into **code**
-vs **test**. Zero runtime dependencies (not even `awk` or `git` at build time
+A fast, standalone source-lines-of-code counter that splits counts into **code**,
+**comment**, and **test** lines. Zero runtime dependencies (not even `awk` or `git` at build time
 — `git` is used opportunistically at run time when inside a repo).
 
 Originally a fish function; rewritten in Zig as a single static binary.
 
 ## What it counts
 
-For every file matching an allowed extension, each non-empty, non-bracket-only,
-non-comment line is counted as either **code** or **test**:
+For every file matching an allowed extension, each non-empty, non-bracket-only
+line is counted as **comment**, **code**, or **test**:
 
 - Whole file is classified as **test** if its path or filename matches a test
   convention (see below).
+- Comment-only lines starting with `//`, `--`, `#`, or `'` are counted as
+  **comment** regardless of file path.
 - For Rust files, lines inside `#[cfg(test)] mod <name> { ... }` blocks are
   counted as **test** regardless of path.
 
@@ -21,8 +23,7 @@ non-comment line is counted as either **code** or **test**:
 A line is not counted when, after trimming, it is:
 
 - empty, or
-- made up entirely of brackets (`{ } [ ] ( )`), or
-- a line comment starting with `//`, `--`, `#`, or `'`.
+- made up entirely of brackets (`{ } [ ] ( )`).
 
 ### Test detection
 
@@ -106,19 +107,19 @@ Extension matching is case-insensitive and supports multi-dot suffixes such as
 ```
 $ sloc
 Included extensions: c, cpp, h, hpp, ...
- code   test  path
-    4      5  .
-    4      3  ├──src/
-    2      0  │   ├──app.py
-    2      3  │   ├──lib.rs
-    0      2  ├──tests/
-    0      2  │   ├──test_app.py
+ code   test  comment  path
+    4      5        3  .
+    4      3        2  ├──src/
+    2      0        1  │   ├──app.py
+    2      3        1  │   ├──lib.rs
+    0      2        1  ├──tests/
+    0      2        1  │   ├──test_app.py
 
 Summary by file type:
-     2       2  .py
-     2       3  .rs
+     2       2        2  .py
+     2       3        1  .rs
 
-     4       5  TOTAL (code / test)
+     4       5        3  TOTAL (code / test / comment)
 ```
 
 ## Tests

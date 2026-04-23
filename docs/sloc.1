@@ -1,6 +1,6 @@
 .TH SLOC 1 "April 2026" "sloc" "User Commands"
 .SH NAME
-sloc \- count source lines of code and tests
+sloc \- count source lines of code, comments, and tests
 .SH SYNOPSIS
 .B sloc
 [\fB-a\fR ext1,ext2]
@@ -12,8 +12,7 @@ sloc \- count source lines of code and tests
 [\fB-h\fR]
 .SH DESCRIPTION
 \fBsloc\fR is a fast, standalone source-lines-of-code counter that separates
-code and test lines. It ignores blank lines, bracket-only lines, and
-single-line comments.
+code, comment, and test lines. It ignores blank lines and bracket-only lines.
 .PP
 When run inside a Git repository, \fBsloc\fR uses tracked and untracked
 non-ignored files from \fBgit ls-files\fR. Outside Git, it falls back to a
