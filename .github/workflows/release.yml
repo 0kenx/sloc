@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   source:
     runs-on: ubuntu-latest
@@ -17,7 +20,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Resolve release version
         id: version
@@ -47,7 +50,7 @@ jobs:
           git archive --format=tar.gz --prefix="sloc-${version}/" -o "$archive" HEAD
 
       - name: Upload source artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-source
           path: sloc-*-source.tar.gz
@@ -62,7 +65,7 @@ jobs:
             target: x86_64-linux-musl
           - runner: ubuntu-latest
             target: aarch64-linux-musl
-          - runner: macos-13
+          - runner: macos-15-intel
             target: x86_64-macos
           - runner: macos-14
             target: aarch64-macos
@@ -71,7 +74,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
@@ -89,7 +92,7 @@ jobs:
           tar -C "$RUNNER_TEMP" -czf "sloc-${version}-${target}.tar.gz" "$(basename "$prefix")"
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target }}
           path: sloc-*.tar.gz
@@ -103,7 +106,7 @@ jobs:
 
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: dist
           pattern: release-*
@@ -116,7 +119,7 @@ jobs:
           sha256sum dist/*.tar.gz | sort -k2 > dist/checksums.txt
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.tar.gz
