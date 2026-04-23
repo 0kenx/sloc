@@ -14,8 +14,9 @@ the enabled buckets:
 
 - Whole file is classified as **test** if its path or filename matches a test
   convention (see below).
-- Comment-only lines starting with `//`, `--`, `#`, or `'` are counted as
-  **comment** unless disabled with `-c` / `--no-comments`.
+- Audited default extensions use per-language plugins for comment styles and
+  test heuristics. Unknown `--add` extensions fall back to generic `//`, `--`,
+  `#`, and `'` comment markers.
 - Blank lines are counted only with `-b` / `--blanks`.
 - Symbol-only lines are skipped by default; `-p` / `--count-symbols` counts
   them as **code** or **test** depending on context.

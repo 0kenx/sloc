@@ -1,5 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
+const lang_plugins = @import("lang_plugins.zig");
 
 const default_exts = [_][]const u8{
     "c",       "cpp",        "h",     "hpp",  "cmake",    "mk",     "bzl",      "py",
@@ -23,15 +24,6 @@ const default_exts = [_][]const u8{
     "rktl",    "rpym",       "rpymc", "sc",   "bas",      "cls",    "frm",      "shtml",
     "app.src",
 };
-
-const test_path_dirs = [_][]const u8{
-    "test", "tests",   "spec",       "specs",   "__tests__",
-    "e2e",  "cypress", "playwright", "testing", "fixtures",
-};
-
-const jvm_exts = [_][]const u8{ "java", "kt", "scala", "groovy" };
-const jvm_test_suffixes = [_][]const u8{ "Test", "Tests", "IT", "ITCase" };
-const filename_test_suffixes = [_][]const u8{ "_test", "_tests", "_spec" };
 
 const FileCount = struct {
     path: []const u8,
@@ -60,11 +52,7 @@ const Options = struct {
     help: bool = false,
 };
 
-const CountOptions = struct {
-    show_comments: bool = true,
-    show_blanks: bool = false,
-    count_symbol_only: bool = false,
-};
+const CountOptions = lang_plugins.CountOptions;
 
 const RenderOptions = struct {
     split_tests: bool = true,
@@ -237,18 +225,6 @@ fn asciiEndsWithIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return haystack.len >= needle.len and asciiEqlIgnoreCase(haystack[haystack.len - needle.len ..], needle);
 }
 
-fn hasExt(list: []const []const u8, ext: []const u8) bool {
-    for (list) |e| if (asciiEqlIgnoreCase(e, ext)) return true;
-    return false;
-}
-
-fn fileExtension(path: []const u8) ?[]const u8 {
-    const base = std.fs.path.basename(path);
-    const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse return null;
-    if (dot == 0 or dot + 1 == base.len) return null;
-    return base[dot + 1 ..];
-}
-
 fn basenameMatchesExt(base: []const u8, ext: []const u8) bool {
     if (ext.len == 0) return false;
     if (base.len <= ext.len + 1) return false;
@@ -267,199 +243,6 @@ fn matchedAllowedExt(path: []const u8, allowed: []const []const u8) ?[]const u8 
         if (best == null or ext.len > best.?.len) best = ext;
     }
     return best;
-}
-
-fn isTestPath(path: []const u8) bool {
-    var it = std.mem.splitScalar(u8, path, '/');
-    var parts_buf: [256][]const u8 = undefined;
-    var n: usize = 0;
-    while (it.next()) |p| {
-        if (n >= parts_buf.len) break;
-        parts_buf[n] = p;
-        n += 1;
-    }
-    if (n == 0) return false;
-
-    if (n >= 2) {
-        for (parts_buf[0 .. n - 1]) |comp| {
-            for (test_path_dirs) |td| {
-                if (asciiEqlIgnoreCase(comp, td)) return true;
-            }
-        }
-    }
-
-    const base = parts_buf[n - 1];
-
-    if (asciiEqlIgnoreCase(base, "conftest.py")) return true;
-
-    const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse return false;
-    if (dot == 0) return false;
-    const name = base[0..dot];
-    const ext = base[dot + 1 ..];
-    if (ext.len == 0) return false;
-
-    if (asciiStartsWithIgnoreCase(name, "test_") and name.len > 5) return true;
-    if (asciiStartsWithIgnoreCase(name, "tests_") and name.len > 6) return true;
-
-    for (filename_test_suffixes) |s| {
-        if (name.len > s.len and asciiEndsWithIgnoreCase(name, s)) return true;
-    }
-
-    if (std.mem.lastIndexOfScalar(u8, name, '.')) |inner| {
-        const inner_ext = name[inner + 1 ..];
-        if (asciiEqlIgnoreCase(inner_ext, "test") or asciiEqlIgnoreCase(inner_ext, "spec")) return true;
-    }
-
-    var is_jvm = false;
-    for (jvm_exts) |je| if (asciiEqlIgnoreCase(ext, je)) {
-        is_jvm = true;
-        break;
-    };
-    if (is_jvm) {
-        for (jvm_test_suffixes) |s| {
-            if (name.len > s.len and asciiEndsWithIgnoreCase(name, s)) return true;
-        }
-    }
-
-    return false;
-}
-
-fn isWhitespaceByte(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\r';
-}
-
-const LineKind = enum {
-    blank,
-    comment,
-    symbol,
-    countable,
-};
-
-fn isSymbolOnlyTrimmed(trimmed: []const u8) bool {
-    for (trimmed) |c| {
-        if (c >= 128 or std.ascii.isAlphanumeric(c) or c == '_') return false;
-    }
-    return true;
-}
-
-fn classifyLine(line: []const u8) LineKind {
-    const trimmed = std.mem.trim(u8, line, " \t\r");
-    if (trimmed.len == 0) return .blank;
-
-    if (trimmed.len >= 2 and trimmed[0] == '/' and trimmed[1] == '/') return .comment;
-    if (trimmed.len >= 2 and trimmed[0] == '-' and trimmed[1] == '-') return .comment;
-    if (trimmed[0] == '#') return .comment;
-    if (trimmed[0] == '\'') return .comment;
-    if (isSymbolOnlyTrimmed(trimmed)) return .symbol;
-
-    return .countable;
-}
-
-fn isCfgContinuation(line: []const u8) bool {
-    const trimmed = std.mem.trimLeft(u8, line, " \t\r");
-    if (trimmed.len == 0) return true;
-    if (std.mem.startsWith(u8, trimmed, "#[")) return true;
-    if (std.mem.startsWith(u8, trimmed, "mod")) {
-        if (trimmed.len == 3) return true;
-        if (isWhitespaceByte(trimmed[3])) return true;
-    }
-    return false;
-}
-
-fn containsTestModDecl(line: []const u8) bool {
-    var i: usize = 0;
-    while (i + 3 <= line.len) : (i += 1) {
-        if (i > 0) {
-            const prev = line[i - 1];
-            if (!isWhitespaceByte(prev)) continue;
-        }
-        if (line[i] != 'm' or line[i + 1] != 'o' or line[i + 2] != 'd') continue;
-        var j = i + 3;
-        if (j >= line.len) return false;
-        if (!isWhitespaceByte(line[j])) continue;
-        while (j < line.len and isWhitespaceByte(line[j])) : (j += 1) {}
-        if (j >= line.len) return false;
-        const first = line[j];
-        const is_ident_start = (first == '_') or std.ascii.isAlphabetic(first);
-        if (!is_ident_start) continue;
-        j += 1;
-        while (j < line.len) : (j += 1) {
-            const c = line[j];
-            if (!(c == '_' or std.ascii.isAlphanumeric(c))) break;
-        }
-        while (j < line.len and isWhitespaceByte(line[j])) : (j += 1) {}
-        if (j < line.len and line[j] == '{') return true;
-    }
-    return false;
-}
-
-const LineCount = struct {
-    test_count: u64,
-    comment_count: u64,
-    blank_count: u64,
-    code_count: u64,
-};
-
-fn countFile(content: []const u8, force_test: bool, rust_mode: bool, opts: CountOptions) LineCount {
-    var tc: u64 = 0;
-    var mc: u64 = 0;
-    var bc: u64 = 0;
-    var cc: u64 = 0;
-    var in_test = false;
-    var depth: i64 = 0;
-    var seen_cfg = false;
-
-    var it = std.mem.splitScalar(u8, content, '\n');
-    while (it.next()) |raw_line| {
-        var line = raw_line;
-        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-
-        if (rust_mode and !force_test) {
-            if (std.mem.indexOf(u8, line, "#[cfg(test)]") != null) {
-                seen_cfg = true;
-            }
-            if (seen_cfg and containsTestModDecl(line)) {
-                in_test = true;
-                seen_cfg = false;
-            }
-            if (in_test) {
-                for (line) |c| {
-                    if (c == '{') {
-                        depth += 1;
-                    } else if (c == '}') {
-                        depth -= 1;
-                    }
-                }
-            }
-            if (seen_cfg and !isCfgContinuation(line)) {
-                seen_cfg = false;
-            }
-        }
-
-        switch (classifyLine(line)) {
-            .blank => {
-                if (opts.show_blanks) bc += 1;
-            },
-            .comment => {
-                if (opts.show_comments) mc += 1;
-            },
-            .symbol => {
-                if (opts.count_symbol_only) {
-                    if (force_test or in_test) tc += 1 else cc += 1;
-                }
-            },
-            .countable => {
-                if (force_test or in_test) tc += 1 else cc += 1;
-            },
-        }
-
-        if (in_test and depth <= 0) {
-            in_test = false;
-            depth = 0;
-        }
-    }
-
-    return .{ .test_count = tc, .comment_count = mc, .blank_count = bc, .code_count = cc };
 }
 
 fn runGit(
@@ -1210,12 +993,10 @@ pub fn main() !void {
 
     for (files_raw.items) |path| {
         const content = std.fs.cwd().readFileAlloc(allocator, path, 128 * 1024 * 1024) catch continue;
-        const force_test = isTestPath(path);
         const matched_ext = matchedAllowedExt(path, allowed.items) orelse continue;
-        const is_rust = blk: {
-            break :blk asciiEqlIgnoreCase(matched_ext, "rs");
-        };
-        const c = countFile(content, force_test, is_rust, count_opts);
+        const plugin = lang_plugins.resolve(matched_ext);
+        const force_test = lang_plugins.isTestPath(path, plugin);
+        const c = lang_plugins.countFile(content, force_test, plugin, count_opts);
         total_code += c.code_count;
         total_test += c.test_count;
         total_comment += c.comment_count;
@@ -1273,7 +1054,7 @@ pub fn main() !void {
                 const counts = makeDisplayCount(f.code_count, f.test_count, f.comment_count, f.blank_count, render_opts);
                 try writeVisibleNums(stdout, counts, widths, render_opts, color);
                 try stdout.writeAll("  ");
-                if (isTestPath(f.path)) {
+                if (lang_plugins.isTestPath(f.path, lang_plugins.resolve(f.ext))) {
                     try stdout.writeAll(color.yellow);
                     try stdout.writeAll(f.path);
                     try stdout.writeAll(color.reset);
@@ -1314,28 +1095,6 @@ fn w_noFiles(w: *std.Io.Writer, color: Color) !void {
 
 // ---------- tests ----------
 
-test "isTestPath - path components" {
-    try std.testing.expect(isTestPath("src/tests/foo.py"));
-    try std.testing.expect(isTestPath("tests/foo.py"));
-    try std.testing.expect(isTestPath("a/b/spec/foo.js"));
-    try std.testing.expect(isTestPath("e2e/login.ts"));
-    try std.testing.expect(!isTestPath("src/main.py"));
-}
-
-test "isTestPath - filename patterns" {
-    try std.testing.expect(isTestPath("foo_test.go"));
-    try std.testing.expect(isTestPath("bar_spec.rb"));
-    try std.testing.expect(isTestPath("foo.test.ts"));
-    try std.testing.expect(isTestPath("a/foo.spec.ts"));
-    try std.testing.expect(isTestPath("test_foo.py"));
-    try std.testing.expect(isTestPath("conftest.py"));
-    try std.testing.expect(isTestPath("FooTest.java"));
-    try std.testing.expect(isTestPath("FooTests.JAVA"));
-    try std.testing.expect(isTestPath("FooIT.scala"));
-    try std.testing.expect(!isTestPath("FooTest.py"));
-    try std.testing.expect(!isTestPath("main.go"));
-}
-
 test "matchedAllowedExt - case insensitive and multi-dot" {
     const allowed = [_][]const u8{ "rs", "app.src", "py" };
 
@@ -1356,87 +1115,6 @@ test "splitCommaAppend - strips leading dot" {
     try std.testing.expectEqualStrings("py", list.items[0]);
     try std.testing.expectEqualStrings("app.src", list.items[1]);
     try std.testing.expectEqualStrings("RS", list.items[2]);
-}
-
-test "classifyLine" {
-    try std.testing.expectEqual(LineKind.blank, classifyLine(""));
-    try std.testing.expectEqual(LineKind.blank, classifyLine("   "));
-    try std.testing.expectEqual(LineKind.symbol, classifyLine("  { "));
-    try std.testing.expectEqual(LineKind.symbol, classifyLine("})"));
-    try std.testing.expectEqual(LineKind.comment, classifyLine("// comment"));
-    try std.testing.expectEqual(LineKind.comment, classifyLine("  -- haskell comment"));
-    try std.testing.expectEqual(LineKind.comment, classifyLine("# python"));
-    try std.testing.expectEqual(LineKind.comment, classifyLine("' fish"));
-    try std.testing.expectEqual(LineKind.countable, classifyLine("let x = 1;"));
-    try std.testing.expectEqual(LineKind.countable, classifyLine("function foo() {"));
-}
-
-test "countFile - basic" {
-    const src =
-        \\// comment
-        \\let x = 1;
-        \\
-        \\{
-        \\let y = 2;
-        \\}
-    ;
-    const r = countFile(src, false, false, .{});
-    try std.testing.expectEqual(@as(u64, 0), r.test_count);
-    try std.testing.expectEqual(@as(u64, 1), r.comment_count);
-    try std.testing.expectEqual(@as(u64, 0), r.blank_count);
-    try std.testing.expectEqual(@as(u64, 2), r.code_count);
-}
-
-test "countFile - rust cfg test" {
-    const src =
-        \\fn real() { 1 }
-        \\
-        \\#[cfg(test)]
-        \\mod tests {
-        \\    fn t1() {}
-        \\    fn t2() {}
-        \\}
-        \\
-        \\fn more() { 2 }
-    ;
-    const r = countFile(src, false, true, .{});
-    try std.testing.expect(r.code_count >= 2);
-    try std.testing.expect(r.test_count >= 2);
-}
-
-test "countFile - force_test" {
-    const src = "// note\nlet x = 1;\nlet y = 2;\n";
-    const r = countFile(src, true, false, .{});
-    try std.testing.expectEqual(@as(u64, 2), r.test_count);
-    try std.testing.expectEqual(@as(u64, 1), r.comment_count);
-    try std.testing.expectEqual(@as(u64, 0), r.blank_count);
-    try std.testing.expectEqual(@as(u64, 0), r.code_count);
-}
-
-test "countFile - blank and symbol toggles" {
-    const src =
-        \\
-        \\{
-        \\let x = 1;
-    ;
-
-    const default_r = countFile(src, false, false, .{});
-    try std.testing.expectEqual(@as(u64, 0), default_r.blank_count);
-    try std.testing.expectEqual(@as(u64, 1), default_r.code_count);
-
-    const full_r = countFile(src, false, false, .{
-        .show_blanks = true,
-        .count_symbol_only = true,
-    });
-    try std.testing.expectEqual(@as(u64, 1), full_r.blank_count);
-    try std.testing.expectEqual(@as(u64, 2), full_r.code_count);
-}
-
-test "countFile - no comments" {
-    const src = "// note\nlet x = 1;\n";
-    const r = countFile(src, false, false, .{ .show_comments = false });
-    try std.testing.expectEqual(@as(u64, 0), r.comment_count);
-    try std.testing.expectEqual(@as(u64, 1), r.code_count);
 }
 
 test "commaWidth and writeCommaU64" {
