@@ -48,6 +48,8 @@ const Options = struct {
     show_comments: bool = true,
     show_blanks: bool = false,
     count_symbol_only: bool = false,
+    line_authors: bool = false,
+    churn: bool = false,
     version: bool = false,
     help: bool = false,
 };
@@ -81,6 +83,10 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Options {
             opts.show_blanks = v;
         } else if (takeToggleFlag(a, "--count-symbols", "--no-count-symbols")) |v| {
             opts.count_symbol_only = v;
+        } else if (std.mem.eql(u8, a, "--line-authors")) {
+            opts.line_authors = true;
+        } else if (std.mem.eql(u8, a, "--churn")) {
+            opts.churn = true;
         } else if (std.mem.eql(u8, a, "-V") or std.mem.eql(u8, a, "--version")) {
             opts.version = true;
         } else if (try takeValueArg(argv, &i, a, "-a", "--add")) |v| {
@@ -136,6 +142,8 @@ fn applyShortFlag(flag: u8, opts: *Options) !void {
         'c' => opts.show_comments = false,
         'b' => opts.show_blanks = true,
         'p' => opts.count_symbol_only = true,
+        'l' => opts.line_authors = true,
+        'r' => opts.churn = true,
         else => return ArgError.UnknownOption,
     }
 }
@@ -151,10 +159,10 @@ fn takeShortFlagBundle(a: []const u8, opts: *Options) !bool {
 fn printHelp(w: *std.Io.Writer) !void {
     try w.print("sloc {s}\n\n", .{build_options.version});
     try w.writeAll(
-        \\Usage: sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-n] [-c] [-b] [-p]
+        \\Usage: sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-n] [-c] [-b] [-p] [-l] [-r]
         \\            [--split-tests|--no-split-tests] [--comments|--no-comments]
         \\            [--blanks|--no-blanks] [--count-symbols|--no-count-symbols]
-        \\            [-V] [-h]
+        \\            [--line-authors] [--churn] [-V] [-h]
         \\Count code, test, and comment lines by default. Blank lines and symbol-only
         \\lines are excluded unless enabled.
         \\
@@ -168,13 +176,15 @@ fn printHelp(w: *std.Io.Writer) !void {
         \\  -c, --no-comments       Exclude comment lines from counts and output
         \\  -b, --blanks            Show blank-line counts (default: off)
         \\  -p, --count-symbols     Count symbol-only lines as code/test (default: off)
+        \\  -l, --line-authors      Use git blame to color summary bars by line author
+        \\  -r, --churn             Use git log to show added/deleted churn by file type
         \\      --split-tests       Show separate code and test columns (default: on)
         \\      --comments          Show comment-line counts (default: on)
         \\      --no-blanks         Exclude blank lines from counts and output
         \\      --no-count-symbols  Exclude symbol-only lines from counts
         \\  -V, --version           Display version information
         \\  -h, --help              Display this help message
-        \\                          Short flags can be combined, e.g. -ncb
+        \\                          Short flags can be combined, e.g. -ncblr
         \\
         \\Test detection:
         \\  - Path patterns: tests/, test/, spec/, specs/, __tests__/, e2e/,
@@ -244,6 +254,48 @@ fn matchedAllowedExt(path: []const u8, allowed: []const []const u8) ?[]const u8 
     }
     return best;
 }
+
+const ChurnExtMatcher = struct {
+    exact: std.StringHashMap([]const u8),
+    dotted: std.ArrayList([]const u8),
+
+    fn init(allocator: std.mem.Allocator, allowed: []const []const u8) !ChurnExtMatcher {
+        var matcher = ChurnExtMatcher{
+            .exact = std.StringHashMap([]const u8).init(allocator),
+            .dotted = .empty,
+        };
+        for (allowed) |ext| {
+            if (std.mem.indexOfScalar(u8, ext, '.') != null) {
+                try matcher.dotted.append(allocator, ext);
+                continue;
+            }
+            const normalized = try allocator.dupe(u8, ext);
+            _ = std.ascii.lowerString(normalized, normalized);
+            try matcher.exact.put(normalized, ext);
+        }
+        return matcher;
+    }
+
+    fn match(self: *const ChurnExtMatcher, path: []const u8) ?[]const u8 {
+        const base = std.fs.path.basename(path);
+
+        var best: ?[]const u8 = null;
+        for (self.dotted.items) |ext| {
+            if (!basenameMatchesExt(base, ext)) continue;
+            if (best == null or ext.len > best.?.len) best = ext;
+        }
+        if (best != null) return best;
+
+        const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse return null;
+        if (dot == 0 or dot == base.len - 1) return null;
+        const raw_ext = base[dot + 1 ..];
+        var buf: [256]u8 = undefined;
+        if (raw_ext.len > buf.len) return null;
+        const normalized = buf[0..raw_ext.len];
+        _ = std.ascii.lowerString(normalized, raw_ext);
+        return self.exact.get(normalized);
+    }
+};
 
 fn runGit(
     allocator: std.mem.Allocator,
@@ -605,6 +657,138 @@ fn writeBar(w: *std.Io.Writer, n: u64, max: u64, width: usize, color: Color) !vo
     try w.writeAll(color.reset);
 }
 
+fn scaledBlockWidth(n: u64, max: u64, width: usize) usize {
+    if (max == 0 or width == 0 or n == 0) return 0;
+    const scaled = (@as(u128, n) * @as(u128, width) + @as(u128, max) / 2) / @as(u128, max);
+    return @max(1, @min(width, @as(usize, @intCast(scaled))));
+}
+
+fn segmentEnd(cumulative: u64, total: u64, width: usize) usize {
+    if (total == 0 or width == 0) return 0;
+    const scaled = (@as(u128, cumulative) * @as(u128, width) + @as(u128, total) / 2) / @as(u128, total);
+    return @min(width, @as(usize, @intCast(scaled)));
+}
+
+fn authorColor(author: []const u8, color: Color) []const u8 {
+    const palette = [_][]const u8{
+        color.green,
+        color.yellow,
+        color.magenta,
+        color.cyan,
+        color.blue,
+    };
+    const hash = std.hash.Wyhash.hash(0, author);
+    return palette[@intCast(hash % palette.len)];
+}
+
+fn writeBlockSegment(w: *std.Io.Writer, width: usize, segment_color: []const u8, color: Color) !void {
+    if (width == 0) return;
+    try w.writeAll(segment_color);
+    var i: usize = 0;
+    while (i < width) : (i += 1) try w.writeAll("█");
+    try w.writeAll(color.reset);
+}
+
+fn authorRowsTotal(rows: []const AuthorRow, ext: []const u8) u64 {
+    var total: u64 = 0;
+    for (rows) |row| {
+        if (std.mem.eql(u8, row.ext, ext)) total += row.total();
+    }
+    return total;
+}
+
+fn writeAuthorBar(
+    w: *std.Io.Writer,
+    rows: []const AuthorRow,
+    ext: []const u8,
+    row_total: u64,
+    max_total: u64,
+    width: usize,
+    color: Color,
+) !void {
+    const graph_width = scaledBlockWidth(row_total, max_total, width);
+    if (graph_width == 0) return;
+
+    const author_total = authorRowsTotal(rows, ext);
+    const segment_total = @max(row_total, author_total);
+    var cumulative: u64 = 0;
+    var previous_end: usize = 0;
+
+    for (rows) |row| {
+        if (!std.mem.eql(u8, row.ext, ext)) continue;
+        const row_count = row.total();
+        if (row_count == 0) continue;
+        cumulative += row_count;
+        const end = segmentEnd(cumulative, segment_total, graph_width);
+        try writeBlockSegment(w, end - previous_end, authorColor(row.author, color), color);
+        previous_end = end;
+    }
+
+    if (row_total > author_total) {
+        cumulative += row_total - author_total;
+        const end = segmentEnd(cumulative, segment_total, graph_width);
+        try writeBlockSegment(w, end - previous_end, color.gray, color);
+        previous_end = end;
+    }
+
+    if (previous_end < graph_width) {
+        try writeBlockSegment(w, graph_width - previous_end, color.gray, color);
+    }
+}
+
+fn writeAuthorLegend(
+    w: *std.Io.Writer,
+    rows: []const AuthorRow,
+    ext: []const u8,
+    row_total: u64,
+    color: Color,
+) !void {
+    if (row_total == 0) return;
+
+    const max_authors: usize = 5;
+    var shown: usize = 0;
+    var hidden: usize = 0;
+    var hidden_total: u64 = 0;
+    var author_total: u64 = 0;
+    var wrote_any = false;
+
+    for (rows) |row| {
+        if (!std.mem.eql(u8, row.ext, ext)) continue;
+        const row_count = row.total();
+        if (row_count == 0) continue;
+        author_total += row_count;
+        if (shown >= max_authors) {
+            hidden += 1;
+            hidden_total += row_count;
+            continue;
+        }
+        if (wrote_any) try w.writeAll(", ");
+        try w.writeAll(authorColor(row.author, color));
+        try w.writeAll(row.author);
+        try w.writeAll(color.reset);
+        try w.writeByte(' ');
+        try writePercentCell(w, row_count, row_total, percentCellWidth(row_count, row_total));
+        shown += 1;
+        wrote_any = true;
+    }
+
+    if (hidden > 0) {
+        if (wrote_any) try w.writeAll(", ");
+        try w.print("+{d} more ", .{hidden});
+        try writePercentCell(w, hidden_total, row_total, percentCellWidth(hidden_total, row_total));
+        wrote_any = true;
+    }
+
+    if (row_total > author_total) {
+        if (wrote_any) try w.writeAll(", ");
+        try w.writeAll(color.gray);
+        try w.writeAll("unattributed");
+        try w.writeAll(color.reset);
+        try w.writeByte(' ');
+        try writePercentCell(w, row_total - author_total, row_total, percentCellWidth(row_total - author_total, row_total));
+    }
+}
+
 fn writeVisibleHeaders(
     w: *std.Io.Writer,
     widths: ColumnWidths,
@@ -822,16 +1006,63 @@ const ExtRow = struct {
     test_c: u64,
     comment_c: u64,
     blank_c: u64,
+    added: u64 = 0,
+    deleted: u64 = 0,
 
     fn total(self: ExtRow) u64 {
         return self.code + self.test_c + self.comment_c + self.blank_c;
     }
+
+    fn churnTotal(self: ExtRow) u64 {
+        return self.added + self.deleted;
+    }
+
+    fn net(self: ExtRow) i128 {
+        return @as(i128, @intCast(self.added)) - @as(i128, @intCast(self.deleted));
+    }
 };
+
+fn churnForExt(rows: []const ChurnRow, ext: []const u8) ChurnRow {
+    for (rows) |row| {
+        if (std.mem.eql(u8, row.ext, ext)) return row;
+    }
+    return .{ .ext = ext };
+}
+
+fn summaryExtensions(
+    allocator: std.mem.Allocator,
+    files: []const FileCount,
+    churn_rows: []const ChurnRow,
+) !std.ArrayList([]const u8) {
+    var list: std.ArrayList([]const u8) = .empty;
+    var seen = std.StringHashMap(void).init(allocator);
+
+    for (files) |f| {
+        if (seen.contains(f.ext)) continue;
+        try seen.put(f.ext, {});
+        try list.append(allocator, f.ext);
+    }
+
+    for (churn_rows) |row| {
+        if (seen.contains(row.ext)) continue;
+        try seen.put(row.ext, {});
+        try list.append(allocator, row.ext);
+    }
+
+    std.mem.sort([]const u8, list.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    return list;
+}
 
 fn printExtensionTable(
     w: *std.Io.Writer,
     allocator: std.mem.Allocator,
     files: []const FileCount,
+    author_rows_opt: ?[]const AuthorRow,
+    churn_rows_opt: ?[]const ChurnRow,
     total_code: u64,
     total_test: u64,
     total_comment: u64,
@@ -840,7 +1071,14 @@ fn printExtensionTable(
     opts: RenderOptions,
     color: Color,
 ) !void {
-    const exts = try uniqExtensions(allocator, files);
+    const empty_author_rows = [_]AuthorRow{};
+    const author_rows = author_rows_opt orelse empty_author_rows[0..];
+    const show_author_bars = author_rows_opt != null;
+    const empty_churn_rows = [_]ChurnRow{};
+    const churn_rows = churn_rows_opt orelse empty_churn_rows[0..];
+    const show_churn = churn_rows_opt != null;
+
+    const exts = try summaryExtensions(allocator, files, churn_rows);
     const rows = try allocator.alloc(ExtRow, exts.items.len);
     for (exts.items, 0..) |e, i| {
         var ec: u64 = 0;
@@ -854,13 +1092,23 @@ fn printExtensionTable(
             em += f.comment_count;
             eb += f.blank_count;
         }
-        rows[i] = .{ .ext = e, .code = ec, .test_c = et, .comment_c = em, .blank_c = eb };
+        const churn = churnForExt(churn_rows, e);
+        rows[i] = .{
+            .ext = e,
+            .code = ec,
+            .test_c = et,
+            .comment_c = em,
+            .blank_c = eb,
+            .added = churn.added,
+            .deleted = churn.deleted,
+        };
     }
 
     if (descending) {
         std.mem.sort(ExtRow, rows, {}, struct {
             fn lt(_: void, a: ExtRow, b: ExtRow) bool {
                 if (a.total() != b.total()) return a.total() > b.total();
+                if (a.churnTotal() != b.churnTotal()) return a.churnTotal() > b.churnTotal();
                 return std.mem.lessThan(u8, a.ext, b.ext);
             }
         }.lt);
@@ -880,12 +1128,27 @@ fn printExtensionTable(
         .blank = @max(commaWidth(total_counts.blank), 5),
     };
     var max_ext: usize = 4; // "TYPE"
+    var total_added: u64 = 0;
+    var total_deleted: u64 = 0;
+    for (churn_rows) |row| {
+        total_added += row.added;
+        total_deleted += row.deleted;
+    }
+    const total_net = @as(i128, @intCast(total_added)) - @as(i128, @intCast(total_deleted));
+    var added_width: usize = @max(commaWidth(total_added), 5);
+    var deleted_width: usize = @max(commaWidth(total_deleted), 7);
+    var net_width: usize = @max(commaWidthI128(total_net), 3);
+    var churn_width: usize = @max(percentCellWidth(total_deleted, total_added), 5);
     for (rows) |r| {
         const counts = makeDisplayCount(r.code, r.test_c, r.comment_c, r.blank_c, opts);
         widths.primary = @max(widths.primary, commaWidth(counts.primary));
         widths.test_w = @max(widths.test_w, commaWidth(counts.test_c));
         widths.comment = @max(widths.comment, commaWidth(counts.comment));
         widths.blank = @max(widths.blank, commaWidth(counts.blank));
+        added_width = @max(added_width, commaWidth(r.added));
+        deleted_width = @max(deleted_width, commaWidth(r.deleted));
+        net_width = @max(net_width, commaWidthI128(r.net()));
+        churn_width = @max(churn_width, percentCellWidth(r.deleted, r.added));
         max_ext = @max(max_ext, r.ext.len + 1); // +1 for leading '.'
     }
     const bar_width: usize = 20;
@@ -898,16 +1161,46 @@ fn printExtensionTable(
 
     // Header row
     try writeVisibleHeaders(w, widths, opts, color);
+    if (show_churn) {
+        try w.writeAll("  ");
+        try writeRightHeader(w, "ADDED", added_width, color);
+        try w.writeAll("  ");
+        try writeRightHeader(w, "DELETED", deleted_width, color);
+        try w.writeAll("  ");
+        try writeRightHeader(w, "NET", net_width, color);
+        try w.writeAll("  ");
+        try writeRightHeader(w, "CHURN", churn_width, color);
+    }
     try w.writeAll("  ");
     try writeLeftHeader(w, "TYPE", color);
+    if (show_author_bars) {
+        if (max_ext > 4) try padSpaces(w, max_ext - 4);
+        try w.writeAll("  ");
+        try writeLeftHeader(w, "AUTHORS", color);
+    }
     try w.writeByte('\n');
 
-    const header_rule_width = visibleColumnWidth(widths, opts) + 2 + max_ext + 1 + bar_width;
+    const churn_rule_width = if (show_churn)
+        @as(usize, 2) + added_width + 2 + deleted_width + 2 + net_width + 2 + churn_width
+    else
+        @as(usize, 0);
+    const header_rule_width = visibleColumnWidth(widths, opts) + churn_rule_width + 2 + max_ext + 1 + bar_width +
+        if (show_author_bars) @as(usize, 24) else @as(usize, 0);
     try writeRule(w, header_rule_width, color);
 
     for (rows) |r| {
         const counts = makeDisplayCount(r.code, r.test_c, r.comment_c, r.blank_c, opts);
         try writeVisibleNums(w, counts, widths, opts, color);
+        if (show_churn) {
+            try w.writeAll("  ");
+            try writeCodeNum(w, r.added, added_width, color);
+            try w.writeAll("  ");
+            try writeCommentNum(w, r.deleted, deleted_width, color);
+            try w.writeAll("  ");
+            try writeNetNum(w, r.net(), net_width, color);
+            try w.writeAll("  ");
+            try writePercentCell(w, r.deleted, r.added, churn_width);
+        }
         try w.writeAll("  ");
         try w.writeAll(color.dim);
         try w.writeByte('.');
@@ -916,17 +1209,474 @@ fn printExtensionTable(
         const written = r.ext.len + 1;
         if (max_ext > written) try padSpaces(w, max_ext - written);
         try w.writeByte(' ');
-        try writeBar(w, r.total(), max_total, bar_width, color);
+        if (show_author_bars) {
+            try writeAuthorBar(w, author_rows, r.ext, counts.total(), max_total, bar_width, color);
+            try w.writeAll("  ");
+            try writeAuthorLegend(w, author_rows, r.ext, counts.total(), color);
+        } else {
+            try writeBar(w, r.total(), max_total, bar_width, color);
+        }
         try w.writeByte('\n');
     }
 
-    try writeRule(w, visibleColumnWidth(widths, opts), color);
+    try writeRule(w, visibleColumnWidth(widths, opts) + churn_rule_width, color);
 
     try w.writeAll(color.bold);
     try writeVisiblePlainNums(w, total_counts, widths, opts);
+    if (show_churn) {
+        try w.writeAll("  ");
+        try writePlainPadded(w, total_added, added_width);
+        try w.writeAll("  ");
+        try writePlainPadded(w, total_deleted, deleted_width);
+        try w.writeAll("  ");
+        if (net_width > commaWidthI128(total_net)) try padSpaces(w, net_width - commaWidthI128(total_net));
+        try writeCommaI128(w, total_net);
+        try w.writeAll("  ");
+        try writePercentCell(w, total_deleted, total_added, churn_width);
+    }
     try w.writeAll("  TOTAL");
     try w.writeAll(color.reset);
     try w.writeByte('\n');
+}
+
+// ---------- git reports ----------
+
+const AuthorRow = struct {
+    ext: []const u8,
+    author: []const u8,
+    code: u64 = 0,
+    test_c: u64 = 0,
+    comment_c: u64 = 0,
+    blank_c: u64 = 0,
+
+    fn total(self: AuthorRow) u64 {
+        return self.code + self.test_c + self.comment_c + self.blank_c;
+    }
+};
+
+const KindCounts = struct {
+    code: u64 = 0,
+    test_c: u64 = 0,
+    comment_c: u64 = 0,
+    blank_c: u64 = 0,
+
+    fn total(self: KindCounts) u64 {
+        return self.code + self.test_c + self.comment_c + self.blank_c;
+    }
+};
+
+const BlameContext = struct {
+    allocator: std.mem.Allocator,
+    rows: std.ArrayList(AuthorRow) = .empty,
+    index: std.StringHashMap(usize),
+    mutex: std.Thread.Mutex = .{},
+    had_error: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn init(allocator: std.mem.Allocator) BlameContext {
+        return .{
+            .allocator = allocator,
+            .index = std.StringHashMap(usize).init(allocator),
+        };
+    }
+};
+
+const ChurnRow = struct {
+    ext: []const u8,
+    added: u64 = 0,
+    deleted: u64 = 0,
+};
+
+fn percentTenths(numerator: u64, denominator: u64) u64 {
+    if (denominator == 0) return 0;
+    const scaled = @as(u128, numerator) * 1000 + @as(u128, denominator) / 2;
+    return @intCast(scaled / @as(u128, denominator));
+}
+
+fn percentWidthTenths(tenths: u64) usize {
+    return digitsU64(tenths / 10) + 3; // integer part, '.', one decimal, '%'
+}
+
+fn percentCellWidth(numerator: u64, denominator: u64) usize {
+    if (denominator == 0) return 3; // n/a
+    return percentWidthTenths(percentTenths(numerator, denominator));
+}
+
+fn writePercentCell(
+    w: *std.Io.Writer,
+    numerator: u64,
+    denominator: u64,
+    width: usize,
+) !void {
+    if (denominator == 0) {
+        if (width > 3) try padSpaces(w, width - 3);
+        try w.writeAll("n/a");
+        return;
+    }
+
+    const tenths = percentTenths(numerator, denominator);
+    const cw = percentWidthTenths(tenths);
+    if (width > cw) try padSpaces(w, width - cw);
+    try w.print("{d}.{d}%", .{ tenths / 10, tenths % 10 });
+}
+
+fn commaWidthI128(n: i128) usize {
+    if (n < 0) return 1 + commaWidth(@intCast(-n));
+    return commaWidth(@intCast(n));
+}
+
+fn writeCommaI128(w: *std.Io.Writer, n: i128) !void {
+    if (n < 0) {
+        try w.writeByte('-');
+        try writeCommaU64(w, @intCast(-n));
+    } else {
+        try writeCommaU64(w, @intCast(n));
+    }
+}
+
+fn writeNetNum(w: *std.Io.Writer, n: i128, width: usize, color: Color) !void {
+    const cw = commaWidthI128(n);
+    if (width > cw) try padSpaces(w, width - cw);
+    if (n < 0) {
+        try w.writeAll(color.magenta);
+        try writeCommaI128(w, n);
+        try w.writeAll(color.reset);
+    } else if (n == 0) {
+        try w.writeAll(color.dim);
+        try w.writeByte('0');
+        try w.writeAll(color.reset);
+    } else {
+        try w.writeAll(color.green);
+        try writeCommaI128(w, n);
+        try w.writeAll(color.reset);
+    }
+}
+
+fn makePairKey(buf: []u8, ext: []const u8, author: []const u8) ?[]const u8 {
+    const need = ext.len + 1 + author.len;
+    if (need > buf.len) return null;
+    @memcpy(buf[0..ext.len], ext);
+    buf[ext.len] = 0x1f;
+    @memcpy(buf[ext.len + 1 .. need], author);
+    return buf[0..need];
+}
+
+fn dupePairKey(
+    allocator: std.mem.Allocator,
+    ext: []const u8,
+    author: []const u8,
+) ![]const u8 {
+    const out = try allocator.alloc(u8, ext.len + 1 + author.len);
+    @memcpy(out[0..ext.len], ext);
+    out[ext.len] = 0x1f;
+    @memcpy(out[ext.len + 1 ..], author);
+    return out;
+}
+
+fn addKindToCounts(counts: *KindCounts, kind: lang_plugins.LineKind) void {
+    switch (kind) {
+        .skipped => {},
+        .code => {
+            counts.code += 1;
+        },
+        .test_line => {
+            counts.test_c += 1;
+        },
+        .comment => {
+            counts.comment_c += 1;
+        },
+        .blank => {
+            counts.blank_c += 1;
+        },
+    }
+}
+
+fn addCountsToAuthorRow(row: *AuthorRow, counts: KindCounts) void {
+    row.code += counts.code;
+    row.test_c += counts.test_c;
+    row.comment_c += counts.comment_c;
+    row.blank_c += counts.blank_c;
+}
+
+fn countKindsRange(kinds: []const lang_plugins.LineKind, start_line: usize, line_count: usize) KindCounts {
+    if (start_line == 0 or line_count == 0) return .{};
+    const start = start_line - 1;
+    if (start >= kinds.len) return .{};
+    const end = @min(kinds.len, start + line_count);
+
+    var counts = KindCounts{};
+    for (kinds[start..end]) |kind| addKindToCounts(&counts, kind);
+    return counts;
+}
+
+fn addAuthorCounts(
+    allocator: std.mem.Allocator,
+    rows: *std.ArrayList(AuthorRow),
+    index: *std.StringHashMap(usize),
+    ext: []const u8,
+    author: []const u8,
+    counts: KindCounts,
+) !void {
+    if (counts.total() == 0) return;
+
+    var key_buf: [512]u8 = undefined;
+    if (makePairKey(&key_buf, ext, author)) |key| {
+        if (index.get(key)) |row_idx| {
+            addCountsToAuthorRow(&rows.items[row_idx], counts);
+            return;
+        }
+    } else {
+        for (rows.items) |*row| {
+            if (std.mem.eql(u8, row.ext, ext) and std.mem.eql(u8, row.author, author)) {
+                addCountsToAuthorRow(row, counts);
+                return;
+            }
+        }
+    }
+
+    const author_copy = try allocator.dupe(u8, author);
+    const key_copy = try dupePairKey(allocator, ext, author_copy);
+    try index.put(key_copy, rows.items.len);
+    try rows.append(allocator, .{ .ext = ext, .author = author_copy });
+    addCountsToAuthorRow(&rows.items[rows.items.len - 1], counts);
+}
+
+const BlameFileState = struct {
+    path: []const u8,
+    ext: []const u8,
+    kinds: []const lang_plugins.LineKind,
+};
+
+const BlameGroup = struct {
+    commit: []const u8,
+    result_line: usize,
+    line_count: usize,
+};
+
+fn parseBlameGroupHeader(line: []const u8) ?BlameGroup {
+    var fields = std.mem.splitScalar(u8, line, ' ');
+    const commit = fields.next() orelse return null;
+    const source_line_s = fields.next() orelse return null;
+    const result_line_s = fields.next() orelse return null;
+    const line_count_s = fields.next() orelse return null;
+    if (commit.len != 40 and commit.len != 64) return null;
+    for (commit) |c| {
+        if (!std.ascii.isHex(c)) return null;
+    }
+    _ = std.fmt.parseUnsigned(usize, source_line_s, 10) catch return null;
+    const result_line = std.fmt.parseUnsigned(usize, result_line_s, 10) catch return null;
+    const line_count = std.fmt.parseUnsigned(usize, line_count_s, 10) catch return null;
+    return .{
+        .commit = commit,
+        .result_line = result_line,
+        .line_count = line_count,
+    };
+}
+
+fn addAuthorCountsLocked(ctx: *BlameContext, ext: []const u8, author: []const u8, counts: KindCounts) !void {
+    if (counts.total() == 0) return;
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    try addAuthorCounts(ctx.allocator, &ctx.rows, &ctx.index, ext, author, counts);
+}
+
+fn parseBlameIncrementalOutput(
+    ctx: *BlameContext,
+    state: *const BlameFileState,
+    blame: []const u8,
+) !void {
+    var commit_authors = std.StringHashMap([]const u8).init(std.heap.page_allocator);
+    defer commit_authors.deinit();
+
+    var current_group: ?BlameGroup = null;
+    var current_author: ?[]const u8 = null;
+
+    var it = std.mem.splitScalar(u8, blame, '\n');
+    while (it.next()) |line| {
+        if (parseBlameGroupHeader(line)) |group| {
+            current_group = group;
+            current_author = commit_authors.get(group.commit);
+        } else if (std.mem.startsWith(u8, line, "author ")) {
+            current_author = line["author ".len..];
+            if (current_group) |group| try commit_authors.put(group.commit, current_author.?);
+        } else if (std.mem.startsWith(u8, line, "filename ")) {
+            if (current_group) |group| {
+                const author = current_author orelse "Unknown";
+                const counts = countKindsRange(state.kinds, group.result_line, group.line_count);
+                try addAuthorCountsLocked(ctx, state.ext, author, counts);
+            }
+            current_group = null;
+            current_author = null;
+        }
+    }
+}
+
+fn runBlameWorker(ctx: *BlameContext, state: *const BlameFileState) void {
+    const blame_opt = runGit(
+        std.heap.page_allocator,
+        &.{ "git", "blame", "--incremental", "--", state.path },
+        256 * 1024 * 1024,
+    ) catch {
+        ctx.had_error.store(true, .monotonic);
+        return;
+    };
+    const blame = blame_opt orelse return;
+    defer std.heap.page_allocator.free(blame);
+
+    parseBlameIncrementalOutput(ctx, state, blame) catch {
+        ctx.had_error.store(true, .monotonic);
+    };
+}
+
+fn blameJobCount(file_count: usize) usize {
+    if (file_count <= 1) return 1;
+    const cpus = std.Thread.getCpuCount() catch 1;
+    return @max(1, @min(file_count, @min(cpus, 8)));
+}
+
+fn lessAuthorByExtTotalDesc(_: void, a: AuthorRow, b: AuthorRow) bool {
+    if (!std.mem.eql(u8, a.ext, b.ext)) return std.mem.lessThan(u8, a.ext, b.ext);
+    if (a.total() != b.total()) return a.total() > b.total();
+    return std.mem.lessThan(u8, a.author, b.author);
+}
+
+fn collectTrackedFileSet(
+    allocator: std.mem.Allocator,
+) !?std.StringHashMap(void) {
+    const tracked_opt = try runGit(allocator, &.{ "git", "ls-files" }, 128 * 1024 * 1024);
+    const tracked = tracked_opt orelse return null;
+
+    var set = std.StringHashMap(void).init(allocator);
+    var it = std.mem.splitScalar(u8, tracked, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        try set.put(line, {});
+    }
+    return set;
+}
+
+fn collectLineAuthorRows(
+    allocator: std.mem.Allocator,
+    files: []const FileCount,
+    count_opts: CountOptions,
+) ![]AuthorRow {
+    const tracked_set_opt = try collectTrackedFileSet(allocator);
+    var tracked_set = tracked_set_opt orelse return &[_]AuthorRow{};
+
+    var states: std.ArrayList(BlameFileState) = .empty;
+    for (files) |file| {
+        if (!tracked_set.contains(file.path)) continue;
+        if (file.total() == 0) continue;
+        const content = std.fs.cwd().readFileAlloc(allocator, file.path, 128 * 1024 * 1024) catch continue;
+        const plugin = lang_plugins.resolve(file.ext);
+        const force_test = lang_plugins.isTestPath(file.path, plugin);
+        const kinds = try lang_plugins.classifyFileLines(allocator, content, force_test, plugin, count_opts);
+        try states.append(allocator, .{
+            .path = file.path,
+            .ext = file.ext,
+            .kinds = kinds,
+        });
+    }
+
+    if (states.items.len == 0) return &[_]AuthorRow{};
+
+    var ctx = BlameContext.init(allocator);
+    if (states.items.len == 1) {
+        runBlameWorker(&ctx, &states.items[0]);
+    } else {
+        var pool: std.Thread.Pool = undefined;
+        try pool.init(.{
+            .allocator = std.heap.page_allocator,
+            .n_jobs = blameJobCount(states.items.len),
+        });
+        defer pool.deinit();
+
+        var wait_group: std.Thread.WaitGroup = .{};
+        for (states.items) |*state| {
+            pool.spawnWg(&wait_group, runBlameWorker, .{ &ctx, state });
+        }
+        wait_group.wait();
+    }
+
+    std.mem.sort(AuthorRow, ctx.rows.items, {}, lessAuthorByExtTotalDesc);
+    const slice = try ctx.rows.toOwnedSlice(allocator);
+    return slice;
+}
+
+fn addChurnRow(
+    rows: *std.ArrayList(ChurnRow),
+    index: *std.StringHashMap(usize),
+    allocator: std.mem.Allocator,
+    ext: []const u8,
+    added: u64,
+    deleted: u64,
+) !void {
+    if (index.get(ext)) |row_idx| {
+        rows.items[row_idx].added += added;
+        rows.items[row_idx].deleted += deleted;
+        return;
+    }
+    try index.put(ext, rows.items.len);
+    try rows.append(allocator, .{ .ext = ext, .added = added, .deleted = deleted });
+}
+
+fn parseChurnNumstatLine(
+    allocator: std.mem.Allocator,
+    rows: *std.ArrayList(ChurnRow),
+    index: *std.StringHashMap(usize),
+    matcher: *const ChurnExtMatcher,
+    line: []const u8,
+) !void {
+    var fields = std.mem.splitScalar(u8, line, '\t');
+    const added_s = fields.next() orelse return;
+    const deleted_s = fields.next() orelse return;
+    const path = fields.next() orelse return;
+    if (added_s.len == 0 or deleted_s.len == 0) return;
+    if (std.mem.eql(u8, added_s, "-") or std.mem.eql(u8, deleted_s, "-")) return;
+    const ext = matcher.match(path) orelse return;
+    const added = std.fmt.parseUnsigned(u64, added_s, 10) catch return;
+    const deleted = std.fmt.parseUnsigned(u64, deleted_s, 10) catch return;
+    try addChurnRow(rows, index, allocator, ext, added, deleted);
+}
+
+fn collectChurnRows(
+    allocator: std.mem.Allocator,
+    allowed: []const []const u8,
+) !?[]ChurnRow {
+    const argv = &.{ "git", "log", "--all", "--no-merges", "--numstat", "--no-renames", "--format=" };
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch return null;
+
+    const stdout = child.stdout orelse return null;
+    var reader_buf: [64 * 1024]u8 = undefined;
+    var reader = stdout.readerStreaming(&reader_buf);
+
+    const matcher = try ChurnExtMatcher.init(allocator, allowed);
+    var rows: std.ArrayList(ChurnRow) = .empty;
+    var index = std.StringHashMap(usize).init(allocator);
+
+    while (true) {
+        const line_opt = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+            error.ReadFailed => return reader.err.?,
+            error.StreamTooLong => {
+                _ = child.kill() catch {};
+                return null;
+            },
+        };
+        const line = line_opt orelse break;
+        try parseChurnNumstatLine(allocator, &rows, &index, &matcher, line);
+    }
+
+    const term = child.wait() catch return null;
+    switch (term) {
+        .Exited => |code| if (code != 0) return null,
+        else => return null,
+    }
+
+    const slice = try rows.toOwnedSlice(allocator);
+    return slice;
 }
 
 // ---------- main ----------
@@ -977,8 +1727,9 @@ pub fn main() !void {
 
     const allowed = try buildAllowedExts(allocator, &opts);
 
+    const inside_git = isInsideGitRepo(allocator);
     var files_raw: std.ArrayList([]const u8) = .empty;
-    if (isInsideGitRepo(allocator)) {
+    if (inside_git) {
         var seen = std.StringHashMap(void).init(allocator);
         try collectFilesGit(allocator, &files_raw, allowed.items, &seen);
     } else {
@@ -1011,13 +1762,46 @@ pub fn main() !void {
         });
     }
 
-    if (files.items.len == 0) {
+    var author_rows_opt: ?[]const AuthorRow = null;
+    var author_note: ?[]const u8 = null;
+    if (opts.line_authors) {
+        if (!inside_git) {
+            author_note = "line authors unavailable: not inside a git repository";
+        } else {
+            const author_rows = try collectLineAuthorRows(allocator, files.items, count_opts);
+            if (author_rows.len == 0) {
+                author_note = "line authors unavailable: git blame returned no tracked counted lines";
+            } else {
+                author_rows_opt = author_rows;
+            }
+        }
+    }
+
+    var churn_rows_opt: ?[]const ChurnRow = null;
+    var churn_note: ?[]const u8 = null;
+    if (opts.churn) {
+        if (!inside_git) {
+            churn_note = "churn unavailable: not inside a git repository";
+        } else {
+            if (try collectChurnRows(allocator, allowed.items)) |churn_rows| {
+                if (churn_rows.len == 0) {
+                    churn_note = "churn unavailable: no matching file types in commit history";
+                } else {
+                    churn_rows_opt = churn_rows;
+                }
+            } else {
+                churn_note = "churn unavailable: git log returned no numstat data";
+            }
+        }
+    }
+
+    if (files.items.len == 0 and churn_rows_opt == null) {
         try w_noFiles(stdout, color);
         try stdout.flush();
         return;
     }
 
-    if (!opts.summary) {
+    if (!opts.summary and files.items.len > 0) {
         const total_counts = makeDisplayCount(total_code, total_test, total_comment, total_blank, render_opts);
         var widths = ColumnWidths{
             .primary = @max(commaWidth(total_counts.primary), primaryLabel(render_opts).len),
@@ -1075,6 +1859,8 @@ pub fn main() !void {
         stdout,
         allocator,
         files.items,
+        author_rows_opt,
+        churn_rows_opt,
         total_code,
         total_test,
         total_comment,
@@ -1083,6 +1869,18 @@ pub fn main() !void {
         render_opts,
         color,
     );
+
+    if (author_note) |note| {
+        try stdout.writeAll(color.dim);
+        try stdout.print("{s}\n", .{note});
+        try stdout.writeAll(color.reset);
+    }
+
+    if (churn_note) |note| {
+        try stdout.writeAll(color.dim);
+        try stdout.print("{s}\n", .{note});
+        try stdout.writeAll(color.reset);
+    }
 
     try stdout.flush();
 }
@@ -1138,4 +1936,11 @@ test "parseArgs - count toggles and short bundle" {
     try std.testing.expect(opts.show_comments);
     try std.testing.expect(opts.show_blanks);
     try std.testing.expect(opts.count_symbol_only);
+}
+
+test "parseArgs - git report flags" {
+    const argv = [_][]const u8{ "sloc", "-lr" };
+    const opts = try parseArgs(std.testing.allocator, &argv);
+    try std.testing.expect(opts.line_authors);
+    try std.testing.expect(opts.churn);
 }

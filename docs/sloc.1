@@ -12,6 +12,10 @@ sloc \- count source lines of code, comments, and tests
 [\fB-c\fR]
 [\fB-b\fR]
 [\fB-p\fR]
+[\fB-l\fR]
+[\fB-r\fR]
+[\fB--line-authors\fR]
+[\fB--churn\fR]
 [\fB-V\fR]
 [\fB-h\fR]
 .SH DESCRIPTION
@@ -63,6 +67,18 @@ Exclude blank lines from counts and output. This is the default.
 .TP
 .BR --no-count-symbols
 Exclude symbol-only lines from counts. This is the default.
+.TP
+.BR -l ", " --line-authors
+Use \fBgit blame --line-porcelain\fR to color the file-type summary bars by
+current line author. The \fBAUTHORS\fR column lists the largest line authors for
+each file type. The report uses the same code, test, comment, blank, and
+symbol-only settings as the main count.
+.TP
+.BR -r ", " --churn
+Add whole-history \fBgit log --all --no-merges --numstat --no-renames
+--format=\fR columns to the file-type summary. Churn is displayed as deleted
+lines divided by added lines. File types with historical churn but no current
+matching files are still shown.
 .TP
 .BR -V ", " --version
 Print the program version.

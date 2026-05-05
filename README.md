@@ -77,7 +77,8 @@ nix run . -- --summary
 ## Usage
 
 ```
-sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-n] [-c] [-b] [-p] [-V] [-h]
+sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-n] [-c] [-b] [-p] [-l] [-r]
+     [--line-authors] [--churn] [-V] [-h]
 
   -a, --add ext1,ext2     Include additional file extensions
   -e, --exclude ext1,ext2 Exclude specified file extensions
@@ -88,16 +89,31 @@ sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-n] [-c] [-b] [-p] 
   -c, --no-comments       Exclude comment lines from counts and output
   -b, --blanks            Show blank-line counts
   -p, --count-symbols     Count symbol-only lines as code/test
+  -l, --line-authors      Use git blame to color summary bars by line author
+  -r, --churn             Use git log to show added/deleted churn by file type
   -V, --version           Show version
   -h, --help              Show help
 ```
 
-Short boolean flags can be combined, e.g. `-ncb`.
+Short boolean flags can be combined, e.g. `-ncblr`.
 
 ### File discovery
 
 - Inside a git repo: `git ls-files` + untracked-but-not-ignored files.
 - Otherwise: recursive walk of the current directory.
+
+### Git reports
+
+`--line-authors` changes the file-type summary bar into a stacked author bar
+using `git blame --line-porcelain`. Each file type keeps one row, and the
+`AUTHORS` column lists the largest current line authors with their share of that
+file type. The report uses the same code, test, comment, blank, and symbol-only
+settings as the main count.
+
+`--churn` adds whole-history `git log --all --no-merges --numstat --no-renames
+--format=` columns to the file-type summary. `CHURN` is `deleted / added *
+100`; binary numstat entries are skipped. File types with historical churn but
+no current matching files are still shown.
 
 ### Default extensions
 

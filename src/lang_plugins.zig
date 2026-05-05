@@ -13,6 +13,14 @@ pub const LineCount = struct {
     code_count: u64,
 };
 
+pub const LineKind = enum {
+    skipped,
+    code,
+    test_line,
+    comment,
+    blank,
+};
+
 pub const BlockComment = struct {
     start: []const u8,
     end: []const u8,
@@ -45,7 +53,7 @@ const default_test_path_dirs = [_][]const u8{
 const default_test_prefixes = [_][]const u8{ "test_", "tests_" };
 const default_test_suffixes = [_][]const u8{ "_test", "_tests", "_spec" };
 const default_dotted_test_markers = [_][]const u8{ "test", "spec" };
-const default_exact_test_basenames = [_][]const u8{ "conftest.py" };
+const default_exact_test_basenames = [_][]const u8{"conftest.py"};
 const jvm_test_suffixes = [_][]const u8{ "Test", "Tests", "IT", "ITCase" };
 
 const c_block_comments = [_]BlockComment{
@@ -84,16 +92,16 @@ const svelte_block_comments = [_]BlockComment{
     .{ .start = "/*", .end = "*/" },
 };
 
-const slash_prefixes = [_][]const u8{ "//" };
+const slash_prefixes = [_][]const u8{"//"};
 const slash_hash_prefixes = [_][]const u8{ "//", "#" };
-const hash_prefixes = [_][]const u8{ "#" };
-const dash_prefixes = [_][]const u8{ "--" };
-const apostrophe_prefixes = [_][]const u8{ "'" };
-const semicolon_prefixes = [_][]const u8{ ";" };
-const percent_prefixes = [_][]const u8{ "%" };
-const bang_prefixes = [_][]const u8{ "!" };
+const hash_prefixes = [_][]const u8{"#"};
+const dash_prefixes = [_][]const u8{"--"};
+const apostrophe_prefixes = [_][]const u8{"'"};
+const semicolon_prefixes = [_][]const u8{";"};
+const percent_prefixes = [_][]const u8{"%"};
+const bang_prefixes = [_][]const u8{"!"};
 const slash_dash_prefixes = [_][]const u8{ "//-", "//" };
-const handlebars_prefixes = [_][]const u8{ "{{!" };
+const handlebars_prefixes = [_][]const u8{"{{!"};
 
 const c_family_plugin = Plugin{
     .name = "c-family",
@@ -265,12 +273,12 @@ const semicolon_only_plugin = Plugin{
 };
 
 const c_family_exts = [_][]const u8{
-    "c",     "cpp",    "h",      "hpp",    "cc",   "cxx",   "hh",    "hxx",
-    "js",    "jsx",    "ts",     "tsx",    "mjs",  "cjs",   "proto", "cs",
-    "csx",   "dart",   "hx",     "swift",  "sol",  "move",  "mo",    "m",
-    "mm",    "scala",  "kt",     "kts",    "java", "groovy","gradle","gvy",
-    "gy",    "gsh",    "v",      "vh",     "sv",   "svh",   "sc",    "bs",
-    "nut",   "php",    "phtml",  "php3",   "php4", "php5",  "phps",
+    "c",   "cpp",   "h",     "hpp",   "cc",   "cxx",    "hh",     "hxx",
+    "js",  "jsx",   "ts",    "tsx",   "mjs",  "cjs",    "proto",  "cs",
+    "csx", "dart",  "hx",    "swift", "sol",  "move",   "mo",     "m",
+    "mm",  "scala", "kt",    "kts",   "java", "groovy", "gradle", "gvy",
+    "gy",  "gsh",   "v",     "vh",    "sv",   "svh",    "sc",     "bs",
+    "nut", "php",   "phtml", "php3",  "php4", "php5",   "phps",
 };
 
 const go_like_exts = [_][]const u8{
@@ -290,9 +298,9 @@ const html_exts = [_][]const u8{
 };
 
 const hash_only_exts = [_][]const u8{
-    "bzl",       "cmake", "mk",       "py",   "sh",   "yml",   "yaml", "gql",
-    "coffee",    "cr",    "ex",       "exs",  "nim",  "nims",  "prql", "r",
-    "rpy",       "pyi",   "pyw",      "rpym", "rpymc","pl",    "pm",   "ls",
+    "bzl",       "cmake",   "mk",  "py",   "sh",    "yml",  "yaml", "gql",
+    "coffee",    "cr",      "ex",  "exs",  "nim",   "nims", "prql", "r",
+    "rpy",       "pyi",     "pyw", "rpym", "rpymc", "pl",   "pm",   "ls",
     "litcoffee", "liticed",
 };
 
@@ -333,14 +341,14 @@ const semicolon_only_exts = [_][]const u8{
 };
 
 pub fn resolve(ext: []const u8) ?*const Plugin {
-    if (hasExt(&[_][]const u8{ "svelte" }, ext)) return &svelte_plugin;
-    if (hasExt(&[_][]const u8{ "rs" }, ext)) return &rust_plugin;
-    if (hasExt(&[_][]const u8{ "sql" }, ext)) return &sql_plugin;
-    if (hasExt(&[_][]const u8{ "lua" }, ext)) return &lua_plugin;
-    if (hasExt(&[_][]const u8{ "nix" }, ext)) return &nix_plugin;
-    if (hasExt(&[_][]const u8{ "tf" }, ext)) return &terraform_plugin;
+    if (hasExt(&[_][]const u8{"svelte"}, ext)) return &svelte_plugin;
+    if (hasExt(&[_][]const u8{"rs"}, ext)) return &rust_plugin;
+    if (hasExt(&[_][]const u8{"sql"}, ext)) return &sql_plugin;
+    if (hasExt(&[_][]const u8{"lua"}, ext)) return &lua_plugin;
+    if (hasExt(&[_][]const u8{"nix"}, ext)) return &nix_plugin;
+    if (hasExt(&[_][]const u8{"tf"}, ext)) return &terraform_plugin;
     if (hasExt(&[_][]const u8{ "rkt", "rktd", "rktl" }, ext)) return &racket_plugin;
-    if (hasExt(&[_][]const u8{ "jl" }, ext)) return &julia_plugin;
+    if (hasExt(&[_][]const u8{"jl"}, ext)) return &julia_plugin;
     if (hasExt(&[_][]const u8{ "pug", "jade" }, ext)) return &pug_plugin;
     if (hasExt(&[_][]const u8{ "hbs", "handlebars", "mustache" }, ext)) return &handlebars_plugin;
     if (hasExt(&[_][]const u8{ "java", "kt", "kts", "scala", "groovy", "gradle", "gvy", "gy", "gsh" }, ext)) {
@@ -353,12 +361,12 @@ pub fn resolve(ext: []const u8) ?*const Plugin {
     if (hasExt(&clojure_exts, ext)) return &clojure_plugin;
     if (hasExt(&erlang_exts, ext)) return &erlang_plugin;
     if (hasExt(&percent_block_exts, ext)) return &percent_block_plugin;
-    if (hasExt(&[_][]const u8{ "tex" }, ext)) return &percent_only_plugin;
+    if (hasExt(&[_][]const u8{"tex"}, ext)) return &percent_only_plugin;
     if (hasExt(&bang_exts, ext)) return &bang_plugin;
     if (hasExt(&basic_exts, ext)) return &basic_plugin;
     if (hasExt(&semicolon_only_exts, ext)) return &semicolon_only_plugin;
     if (hasExt(&[_][]const u8{ "php", "phtml", "php3", "php4", "php5", "phps" }, ext)) return &php_plugin;
-    if (hasExt(&[_][]const u8{ "rb" }, ext)) return &ruby_plugin;
+    if (hasExt(&[_][]const u8{"rb"}, ext)) return &ruby_plugin;
     if (hasExt(&go_like_exts, ext)) return &go_like_plugin;
     if (hasExt(&slash_only_exts, ext)) return &slash_only_plugin;
     if (hasExt(&c_family_exts, ext)) return &c_family_plugin;
@@ -482,12 +490,60 @@ pub fn countFile(
     };
 }
 
+pub fn classifyFileLines(
+    allocator: std.mem.Allocator,
+    content: []const u8,
+    force_test: bool,
+    plugin: ?*const Plugin,
+    opts: CountOptions,
+) ![]LineKind {
+    var out: std.ArrayList(LineKind) = .empty;
+    var state = CountState{};
+
+    var it = std.mem.splitScalar(u8, content, '\n');
+    while (it.next()) |raw_line| {
+        var line = raw_line;
+        if (line.len > 0 and line[line.len - 1] == '\r') {
+            line = line[0 .. line.len - 1];
+        }
+        try out.append(allocator, classifyLine(line, force_test, plugin, opts, &state));
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
 const CountState = struct {
     active_block_comment_end: ?[]const u8 = null,
     in_test: bool = false,
     test_depth: i64 = 0,
     pending_rust_cfg: bool = false,
 };
+
+fn classifyLine(
+    line: []const u8,
+    force_test: bool,
+    plugin: ?*const Plugin,
+    opts: CountOptions,
+    state: *CountState,
+) LineKind {
+    updateInlineTestStateBeforeLine(line, plugin, force_test, state);
+    const analysis = analyzeLine(line, plugin, state);
+    const in_test = force_test or state.in_test;
+
+    const kind: LineKind = if (analysis.blank)
+        if (opts.show_blanks) .blank else .skipped
+    else if (analysis.comment)
+        if (opts.show_comments) .comment else .skipped
+    else blk: {
+        const logical_lines = @as(u64, analysis.countable) +
+            if (opts.count_symbol_only) @as(u64, analysis.symbol) else 0;
+        if (logical_lines == 0) break :blk .skipped;
+        break :blk if (in_test) .test_line else .code;
+    };
+
+    updateInlineTestStateAfterLine(plugin, state);
+    return kind;
+}
 
 const LineAnalysis = struct {
     blank: bool = false,
