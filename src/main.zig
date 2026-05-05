@@ -1642,6 +1642,7 @@ fn collectChurnRows(
     allocator: std.mem.Allocator,
     allowed: []const []const u8,
 ) !?[]ChurnRow {
+    const matcher = try ChurnExtMatcher.init(allocator, allowed);
     const argv = &.{ "git", "log", "--all", "--no-merges", "--numstat", "--no-renames", "--format=" };
     var child = std.process.Child.init(argv, allocator);
     child.stdin_behavior = .Ignore;
@@ -1649,17 +1650,23 @@ fn collectChurnRows(
     child.stderr_behavior = .Ignore;
     child.spawn() catch return null;
 
-    const stdout = child.stdout orelse return null;
+    const stdout = child.stdout orelse {
+        _ = child.kill() catch {};
+        return null;
+    };
     var reader_buf: [64 * 1024]u8 = undefined;
     var reader = stdout.readerStreaming(&reader_buf);
 
-    const matcher = try ChurnExtMatcher.init(allocator, allowed);
     var rows: std.ArrayList(ChurnRow) = .empty;
     var index = std.StringHashMap(usize).init(allocator);
 
     while (true) {
         const line_opt = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
-            error.ReadFailed => return reader.err.?,
+            error.ReadFailed => {
+                const read_err = reader.err.?;
+                _ = child.kill() catch {};
+                return read_err;
+            },
             error.StreamTooLong => {
                 _ = child.kill() catch {};
                 return null;
