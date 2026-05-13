@@ -191,8 +191,9 @@ fn printHelp(w: *std.Io.Writer) !void {
         \\    cypress/, playwright/, testing/, fixtures/
         \\  - Filename patterns: *_test.*, *_spec.*, *_tests.*, *.test.*, *.spec.*,
         \\    test_*.*, tests_*.*, *Test.{java,kt,scala,groovy}, *Tests.*,
-        \\    *IT.*, *ITCase.*, conftest.py
+        \\    *IT.*, *ITCase.*, conftest.py, Zig test.zig/tests.zig
         \\  - Rust inline: lines inside #[cfg(test)] mod ... { } blocks
+        \\  - Zig inline: lines inside test ... { } blocks
         \\
         \\Default extensions:
     );

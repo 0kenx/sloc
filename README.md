@@ -20,8 +20,8 @@ the enabled buckets:
 - Blank lines are counted only with `-b` / `--blanks`.
 - Symbol-only lines are skipped by default; `-p` / `--count-symbols` counts
   them as **code** or **test** depending on context.
-- For Rust files, lines inside `#[cfg(test)] mod <name> { ... }` blocks are
-  counted as **test** regardless of path.
+- For Rust and Zig files, inline test blocks are counted as **test**
+  regardless of path.
 - `-n` / `--no-split-tests` merges test lines into the main `LINES` column.
 
 ### Skipped lines
@@ -37,8 +37,9 @@ By default, a line is not counted when, after trimming, it is:
   `e2e/`, `cypress/`, `playwright/`, `testing/`, `fixtures/`.
 - **Filenames:** `*_test.*`, `*_tests.*`, `*_spec.*`, `*.test.*`, `*.spec.*`,
   `test_*.*`, `tests_*.*`, `conftest.py`, and `*Test.{java,kt,scala,groovy}`,
-  `*Tests.*`, `*IT.*`, `*ITCase.*`.
+  `*Tests.*`, `*IT.*`, `*ITCase.*`; plus Zig `test.zig` and `tests.zig`.
 - **Rust inline:** `#[cfg(test)] mod <ident> { … }` blocks (brace-tracked).
+- **Zig inline:** `test ... { … }` blocks (brace-tracked).
 
 ## Build
 

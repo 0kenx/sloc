@@ -89,8 +89,9 @@ Show usage information.
 Files are treated as tests when their paths match common test directories such
 as \fBtests/\fR, \fBspec/\fR, \fB__tests__/\fR, \fBe2e/\fR, or when filenames
 match patterns such as \fB*_test.*\fR, \fB*.spec.*\fR, \fBconftest.py\fR, and
-common JVM test suffixes. Rust \fB#[cfg(test)] mod ...\fR blocks are counted as
-test lines even inside non-test files.
+common JVM test suffixes. Zig \fBtest.zig\fR and \fBtests.zig\fR files are also
+treated as tests. Rust \fB#[cfg(test)] mod ...\fR and Zig \fBtest ... { }\fR
+blocks are counted as test lines even inside non-test files.
 .SH EXIT STATUS
 .TP
 .B 0

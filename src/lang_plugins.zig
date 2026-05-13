@@ -29,6 +29,7 @@ pub const BlockComment = struct {
 pub const InlineTestMode = enum {
     none,
     rust_cfg_mod,
+    zig_test_block,
 };
 
 const empty_strings = [_][]const u8{};
@@ -55,6 +56,7 @@ const default_test_suffixes = [_][]const u8{ "_test", "_tests", "_spec" };
 const default_dotted_test_markers = [_][]const u8{ "test", "spec" };
 const default_exact_test_basenames = [_][]const u8{"conftest.py"};
 const jvm_test_suffixes = [_][]const u8{ "Test", "Tests", "IT", "ITCase" };
+const zig_exact_test_basenames = [_][]const u8{ "test.zig", "tests.zig" };
 
 const c_block_comments = [_]BlockComment{
     .{ .start = "/*", .end = "*/" },
@@ -109,11 +111,6 @@ const c_family_plugin = Plugin{
     .block_comments = &c_block_comments,
 };
 
-const slash_only_plugin = Plugin{
-    .name = "slash-only",
-    .line_comment_prefixes = &slash_prefixes,
-};
-
 const go_like_plugin = Plugin{
     .name = "go-like",
     .line_comment_prefixes = &slash_prefixes,
@@ -148,6 +145,13 @@ const rust_plugin = Plugin{
     .line_comment_prefixes = &slash_prefixes,
     .block_comments = &c_block_comments,
     .inline_test_mode = .rust_cfg_mod,
+};
+
+const zig_plugin = Plugin{
+    .name = "zig",
+    .line_comment_prefixes = &slash_prefixes,
+    .exact_test_basenames = &zig_exact_test_basenames,
+    .inline_test_mode = .zig_test_block,
 };
 
 const terraform_plugin = Plugin{
@@ -285,10 +289,6 @@ const go_like_exts = [_][]const u8{
     "go",
 };
 
-const slash_only_exts = [_][]const u8{
-    "zig",
-};
-
 const css_exts = [_][]const u8{
     "css", "scss", "sass", "less", "styl", "stylus",
 };
@@ -343,6 +343,7 @@ const semicolon_only_exts = [_][]const u8{
 pub fn resolve(ext: []const u8) ?*const Plugin {
     if (hasExt(&[_][]const u8{"svelte"}, ext)) return &svelte_plugin;
     if (hasExt(&[_][]const u8{"rs"}, ext)) return &rust_plugin;
+    if (hasExt(&[_][]const u8{"zig"}, ext)) return &zig_plugin;
     if (hasExt(&[_][]const u8{"sql"}, ext)) return &sql_plugin;
     if (hasExt(&[_][]const u8{"lua"}, ext)) return &lua_plugin;
     if (hasExt(&[_][]const u8{"nix"}, ext)) return &nix_plugin;
@@ -368,7 +369,6 @@ pub fn resolve(ext: []const u8) ?*const Plugin {
     if (hasExt(&[_][]const u8{ "php", "phtml", "php3", "php4", "php5", "phps" }, ext)) return &php_plugin;
     if (hasExt(&[_][]const u8{"rb"}, ext)) return &ruby_plugin;
     if (hasExt(&go_like_exts, ext)) return &go_like_plugin;
-    if (hasExt(&slash_only_exts, ext)) return &slash_only_plugin;
     if (hasExt(&c_family_exts, ext)) return &c_family_plugin;
     if (hasExt(&hash_only_exts, ext)) return &hash_only_plugin;
     if (hasExt(&dash_only_exts, ext)) return &dash_only_plugin;
@@ -517,6 +517,7 @@ const CountState = struct {
     in_test: bool = false,
     test_depth: i64 = 0,
     pending_rust_cfg: bool = false,
+    pending_zig_test: bool = false,
 };
 
 fn classifyLine(
@@ -705,6 +706,15 @@ fn updateInlineTestStateBeforeLine(
                 state.pending_rust_cfg = false;
             }
         },
+        .zig_test_block => {
+            if (!state.in_test and startsWithZigTestDecl(line)) {
+                state.in_test = true;
+                state.pending_zig_test = true;
+            }
+            if (state.in_test) {
+                updateZigTestDepthFromLine(line, state);
+            }
+        },
     }
 }
 
@@ -721,6 +731,66 @@ fn updateInlineTestStateAfterLine(
                 state.test_depth = 0;
             }
         },
+        .zig_test_block => {
+            if (state.in_test and !state.pending_zig_test and state.test_depth <= 0) {
+                state.in_test = false;
+                state.test_depth = 0;
+            }
+        },
+    }
+}
+
+fn startsWithZigTestDecl(line: []const u8) bool {
+    const trimmed = std.mem.trimLeft(u8, line, " \t\r");
+    if (!std.mem.startsWith(u8, trimmed, "test")) return false;
+    if (trimmed.len == 4) return true;
+    const next = trimmed[4];
+    return isWhitespaceByte(next) or next == '{';
+}
+
+fn updateZigTestDepthFromLine(line: []const u8, state: *CountState) void {
+    const trimmed = std.mem.trimLeft(u8, line, " \t\r");
+    if (std.mem.startsWith(u8, trimmed, "\\\\")) return;
+
+    var in_string = false;
+    var in_char = false;
+    var escaped = false;
+
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+        if (in_string or in_char) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (in_string and c == '"') {
+                in_string = false;
+            } else if (in_char and c == '\'') {
+                in_char = false;
+            }
+            continue;
+        }
+
+        if (c == '/' and i + 1 < line.len and line[i + 1] == '/') break;
+        if (c == '"') {
+            in_string = true;
+            continue;
+        }
+        if (c == '\'') {
+            in_char = true;
+            continue;
+        }
+        if (c == '{') {
+            state.test_depth += 1;
+            state.pending_zig_test = false;
+        } else if (c == '}') {
+            state.test_depth -= 1;
+        }
     }
 }
 
@@ -798,6 +868,12 @@ test "isTestPath - jvm suffix plugin" {
     try std.testing.expect(!isTestPath("src/FooIT.py", resolve("py")));
 }
 
+test "isTestPath - zig exact test basenames" {
+    try std.testing.expect(isTestPath("test.zig", resolve("zig")));
+    try std.testing.expect(isTestPath("src/tests.zig", resolve("zig")));
+    try std.testing.expect(!isTestPath("src/contest.zig", resolve("zig")));
+}
+
 test "countFile - js block comments without semicolon splitting" {
     const src =
         \\/* header */
@@ -859,4 +935,39 @@ test "countFile - rust cfg test plugin" {
     const result = countFile(src, false, resolve("rs"), .{});
     try std.testing.expect(result.code_count >= 2);
     try std.testing.expect(result.test_count >= 2);
+}
+
+test "countFile - zig inline test blocks" {
+    const src =
+        \\const std = @import("std");
+        \\
+        \\pub fn add(a: u8, b: u8) u8 {
+        \\    return a + b;
+        \\}
+        \\
+        \\test "add works" {
+        \\    try std.testing.expectEqual(@as(u8, 3), add(1, 2));
+        \\}
+        \\
+        \\pub fn more() void {}
+    ;
+    const result = countFile(src, false, resolve("zig"), .{});
+    try std.testing.expectEqual(@as(u64, 4), result.code_count);
+    try std.testing.expectEqual(@as(u64, 2), result.test_count);
+}
+
+test "countFile - zig test block brace tracking ignores strings and comments" {
+    const src =
+        \\fn real() void {}
+        \\
+        \\test "brace } in name" // comment {
+        \\{
+        \\    try std.testing.expect(true);
+        \\}
+        \\
+        \\fn after() void {}
+    ;
+    const result = countFile(src, false, resolve("zig"), .{});
+    try std.testing.expectEqual(@as(u64, 2), result.code_count);
+    try std.testing.expectEqual(@as(u64, 2), result.test_count);
 }
