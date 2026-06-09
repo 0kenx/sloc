@@ -15,6 +15,11 @@ stdenv.mkDerivation {
   dontConfigure = true;
   doCheck = true;
 
+  preBuild = ''
+    export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
+    export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-local-cache"
+  '';
+
   buildPhase = ''
     runHook preBuild
     zig build -Doptimize=ReleaseFast -Dversion="${version}"
