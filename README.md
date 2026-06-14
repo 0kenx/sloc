@@ -43,7 +43,7 @@ By default, a line is not counted when, after trimming, it is:
 
 ## Build
 
-Requires Zig 0.15.2+.
+Requires Zig 0.16.0+.
 
 ```sh
 zig build -Doptimize=ReleaseFast
@@ -78,8 +78,9 @@ nix run . -- --summary
 ## Usage
 
 ```
-sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-n] [-c] [-b] [-p] [-l] [-r]
-     [--line-authors] [--churn] [-V] [-h]
+sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-n] [-c] [-b] [-p] [-l] [-r] [-x]
+     [--line-authors] [--churn] [--complexity] [--top-complexity[=N]]
+     [--top-lines[=N]] [-V] [-h]
 
   -a, --add ext1,ext2     Include additional file extensions
   -e, --exclude ext1,ext2 Exclude specified file extensions
@@ -92,11 +93,14 @@ sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-n] [-c] [-b] [-p] 
   -p, --count-symbols     Count symbol-only lines as code/test
   -l, --line-authors      Use git blame to color summary bars by line author
   -r, --churn             Use git log to show added/deleted churn by file type
+  -x, --complexity        Show average cyclomatic complexity per function
+      --top-complexity[=N] List top files by average complexity (default: 5)
+      --top-lines[=N]      List top files by total line count (default: 5)
   -V, --version           Show version
   -h, --help              Show help
 ```
 
-Short boolean flags can be combined, e.g. `-ncblr`.
+Short boolean flags can be combined, e.g. `-ncblrx`.
 
 ### File discovery
 
@@ -115,6 +119,20 @@ settings as the main count.
 --format=` columns to the file-type summary. `CHURN` is `deleted / added *
 100`; binary numstat entries are skipped. File types with historical churn but
 no current matching files are still shown.
+
+### Complexity
+
+`-x` / `--complexity` adds a `CX/FN` column: detected functions plus detected
+branch decisions divided by detected functions for each file, directory, or
+file type. Files with no detected functions show `n/a`.
+
+Complexity is token-scanned outside comments using per-language keyword and
+operator lists; it is intended as a relative signal, not parser-grade
+per-function attribution.
+
+`--top-complexity[=N]` prints the top files by `CX/FN` after the file-type
+summary and implies `--complexity`. `--top-lines[=N]` prints the top files by
+total counted lines. Both default to 5 rows when `N` is omitted.
 
 ### Default extensions
 

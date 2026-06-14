@@ -2,7 +2,7 @@ Source: sloc
 Section: utils
 Priority: optional
 Maintainer: @MAINTAINER@
-Build-Depends: debhelper-compat (= 13), zig (>= 0.15.2)
+Build-Depends: debhelper-compat (= 13), zig (>= 0.16.0)
 Standards-Version: 4.7.0
 Homepage: https://github.com/@REPO@
 Rules-Requires-Root: no

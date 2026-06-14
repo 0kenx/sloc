@@ -32,9 +32,15 @@ const FileCount = struct {
     comment_count: u64,
     blank_count: u64,
     code_count: u64,
+    decisions: u64 = 0,
+    functions: u64 = 0,
 
     fn total(self: FileCount) u64 {
         return self.test_count + self.comment_count + self.blank_count + self.code_count;
+    }
+
+    fn complexityTenths(self: FileCount) ?u64 {
+        return complexityTenthsFor(self.decisions, self.functions);
     }
 };
 
@@ -50,6 +56,9 @@ const Options = struct {
     count_symbol_only: bool = false,
     line_authors: bool = false,
     churn: bool = false,
+    show_complexity: bool = false,
+    top_complexity: ?usize = null,
+    top_lines: ?usize = null,
     version: bool = false,
     help: bool = false,
 };
@@ -62,7 +71,8 @@ const RenderOptions = struct {
     show_blanks: bool = false,
 };
 
-const ArgError = error{ MissingValue, UnknownOption };
+const ArgError = error{ MissingValue, InvalidValue, UnknownOption };
+const default_top_n: usize = 5;
 
 fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Options {
     var opts = Options{};
@@ -87,6 +97,13 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Options {
             opts.line_authors = true;
         } else if (std.mem.eql(u8, a, "--churn")) {
             opts.churn = true;
+        } else if (std.mem.eql(u8, a, "--complexity")) {
+            opts.show_complexity = true;
+        } else if (try takeOptionalCountArg(argv, &i, a, "--top-complexity")) |n| {
+            opts.top_complexity = n;
+            opts.show_complexity = true;
+        } else if (try takeOptionalCountArg(argv, &i, a, "--top-lines")) |n| {
+            opts.top_lines = n;
         } else if (std.mem.eql(u8, a, "-V") or std.mem.eql(u8, a, "--version")) {
             opts.version = true;
         } else if (try takeValueArg(argv, &i, a, "-a", "--add")) |v| {
@@ -126,6 +143,34 @@ fn takeValueArg(
     return null;
 }
 
+fn takeOptionalCountArg(
+    argv: []const []const u8,
+    i: *usize,
+    a: []const u8,
+    long: []const u8,
+) !?usize {
+    if (std.mem.eql(u8, a, long)) {
+        if (i.* + 1 < argv.len and !std.mem.startsWith(u8, argv[i.* + 1], "-")) {
+            i.* += 1;
+            const n = try parsePositiveUsize(argv[i.*]);
+            return n;
+        }
+        return default_top_n;
+    }
+    if (std.mem.startsWith(u8, a, long) and a.len > long.len and a[long.len] == '=') {
+        const n = try parsePositiveUsize(a[long.len + 1 ..]);
+        return n;
+    }
+    return null;
+}
+
+fn parsePositiveUsize(text: []const u8) !usize {
+    if (text.len == 0) return ArgError.InvalidValue;
+    const n = std.fmt.parseUnsigned(usize, text, 10) catch return ArgError.InvalidValue;
+    if (n == 0) return ArgError.InvalidValue;
+    return n;
+}
+
 fn takeToggleFlag(a: []const u8, positive: []const u8, negative: []const u8) ?bool {
     if (std.mem.eql(u8, a, positive)) return true;
     if (std.mem.eql(u8, a, negative)) return false;
@@ -144,6 +189,7 @@ fn applyShortFlag(flag: u8, opts: *Options) !void {
         'p' => opts.count_symbol_only = true,
         'l' => opts.line_authors = true,
         'r' => opts.churn = true,
+        'x' => opts.show_complexity = true,
         else => return ArgError.UnknownOption,
     }
 }
@@ -159,10 +205,11 @@ fn takeShortFlagBundle(a: []const u8, opts: *Options) !bool {
 fn printHelp(w: *std.Io.Writer) !void {
     try w.print("sloc {s}\n\n", .{build_options.version});
     try w.writeAll(
-        \\Usage: sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-n] [-c] [-b] [-p] [-l] [-r]
+        \\Usage: sloc [-a ext1,ext2] [-e ext1,ext2] [-o ext1,ext2] [-d] [-s] [-n] [-c] [-b] [-p] [-l] [-r] [-x]
         \\            [--split-tests|--no-split-tests] [--comments|--no-comments]
         \\            [--blanks|--no-blanks] [--count-symbols|--no-count-symbols]
-        \\            [--line-authors] [--churn] [-V] [-h]
+        \\            [--line-authors] [--churn] [--complexity]
+        \\            [--top-complexity[=N]] [--top-lines[=N]] [-V] [-h]
         \\Count code, test, and comment lines by default. Blank lines and symbol-only
         \\lines are excluded unless enabled.
         \\
@@ -178,13 +225,16 @@ fn printHelp(w: *std.Io.Writer) !void {
         \\  -p, --count-symbols     Count symbol-only lines as code/test (default: off)
         \\  -l, --line-authors      Use git blame to color summary bars by line author
         \\  -r, --churn             Use git log to show added/deleted churn by file type
+        \\  -x, --complexity        Show average cyclomatic complexity per function
+        \\      --top-complexity[=N] List top files by average complexity (default: 5)
+        \\      --top-lines[=N]      List top files by total line count (default: 5)
         \\      --split-tests       Show separate code and test columns (default: on)
         \\      --comments          Show comment-line counts (default: on)
         \\      --no-blanks         Exclude blank lines from counts and output
         \\      --no-count-symbols  Exclude symbol-only lines from counts
         \\  -V, --version           Display version information
         \\  -h, --help              Display this help message
-        \\                          Short flags can be combined, e.g. -ncblr
+        \\                          Short flags can be combined, e.g. -ncblrx
         \\
         \\Test detection:
         \\  - Path patterns: tests/, test/, spec/, specs/, __tests__/, e2e/,
@@ -300,17 +350,18 @@ const ChurnExtMatcher = struct {
 
 fn runGit(
     allocator: std.mem.Allocator,
+    io: std.Io,
     argv: []const []const u8,
     max_bytes: usize,
 ) !?[]u8 {
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+    const result = std.process.run(allocator, io, .{
         .argv = argv,
-        .max_output_bytes = max_bytes,
+        .stdout_limit = .limited(max_bytes),
+        .stderr_limit = .limited(max_bytes),
     }) catch return null;
     defer allocator.free(result.stderr);
     switch (result.term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 allocator.free(result.stdout);
                 return null;
@@ -324,8 +375,8 @@ fn runGit(
     }
 }
 
-fn isInsideGitRepo(allocator: std.mem.Allocator) bool {
-    const stdout = runGit(allocator, &.{ "git", "rev-parse", "--is-inside-work-tree" }, 4096) catch return false;
+fn isInsideGitRepo(allocator: std.mem.Allocator, io: std.Io) bool {
+    const stdout = runGit(allocator, io, &.{ "git", "rev-parse", "--is-inside-work-tree" }, 4096) catch return false;
     if (stdout == null) return false;
     allocator.free(stdout.?);
     return true;
@@ -337,13 +388,14 @@ fn matchesExtFilter(path: []const u8, allowed: []const []const u8) bool {
 
 fn collectFilesGit(
     allocator: std.mem.Allocator,
+    io: std.Io,
     out: *std.ArrayList([]const u8),
     allowed: []const []const u8,
     seen: *std.StringHashMap(void),
 ) !void {
     const max = 128 * 1024 * 1024;
-    const tracked_opt = try runGit(allocator, &.{ "git", "ls-files" }, max);
-    const untracked_opt = try runGit(allocator, &.{ "git", "ls-files", "--others", "--exclude-standard" }, max);
+    const tracked_opt = try runGit(allocator, io, &.{ "git", "ls-files" }, max);
+    const untracked_opt = try runGit(allocator, io, &.{ "git", "ls-files", "--others", "--exclude-standard" }, max);
 
     const sources = [_]?[]u8{ tracked_opt, untracked_opt };
     for (sources) |src_opt| {
@@ -362,16 +414,17 @@ fn collectFilesGit(
 
 fn collectFilesWalk(
     allocator: std.mem.Allocator,
+    io: std.Io,
     out: *std.ArrayList([]const u8),
     allowed: []const []const u8,
 ) !void {
-    var dir = try std.fs.cwd().openDir(".", .{ .iterate = true });
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().openDir(io, ".", .{ .iterate = true });
+    defer dir.close(io);
 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!matchesExtFilter(entry.path, allowed)) continue;
         const copy = try allocator.dupe(u8, entry.path);
@@ -556,9 +609,9 @@ const Color = struct {
     }
 };
 
-fn colorEnabled(allocator: std.mem.Allocator) bool {
-    if (std.process.hasEnvVar(allocator, "NO_COLOR") catch false) return false;
-    return std.fs.File.stdout().isTty();
+fn colorEnabled(environ: std.process.Environ, io: std.Io) bool {
+    if (environ.containsConstant("NO_COLOR")) return false;
+    return std.Io.File.stdout().isTty(io) catch false;
 }
 
 fn writeCodeNum(w: *std.Io.Writer, n: u64, width: usize, color: Color) !void {
@@ -863,10 +916,16 @@ const Node = struct {
     test_c: u64,
     comment_c: u64,
     blank_c: u64,
+    decisions: u64,
+    functions: u64,
     children: std.ArrayList(*Node),
 
     fn total(self: *const Node) u64 {
         return self.code + self.test_c + self.comment_c + self.blank_c;
+    }
+
+    fn complexityTenths(self: *const Node) ?u64 {
+        return complexityTenthsFor(self.decisions, self.functions);
     }
 };
 
@@ -883,6 +942,8 @@ fn newNode(
         .test_c = 0,
         .comment_c = 0,
         .blank_c = 0,
+        .decisions = 0,
+        .functions = 0,
         .children = .empty,
     };
     return n;
@@ -909,6 +970,10 @@ fn buildTree(allocator: std.mem.Allocator, files: []const FileCount) !*Node {
         root.test_c += f.test_count;
         root.comment_c += f.comment_count;
         root.blank_c += f.blank_count;
+        if (f.functions > 0) {
+            root.decisions += f.decisions;
+            root.functions += f.functions;
+        }
 
         var cursor = root;
         var it = std.mem.splitScalar(u8, f.path, '/');
@@ -921,6 +986,10 @@ fn buildTree(allocator: std.mem.Allocator, files: []const FileCount) !*Node {
             node.test_c += f.test_count;
             node.comment_c += f.comment_count;
             node.blank_c += f.blank_count;
+            if (f.functions > 0) {
+                node.decisions += f.decisions;
+                node.functions += f.functions;
+            }
             cursor = node;
             part_opt = next;
         }
@@ -958,11 +1027,17 @@ fn printTree(
     is_last: bool,
     is_root: bool,
     widths: ColumnWidths,
+    complexity_width: usize,
     opts: RenderOptions,
+    show_complexity: bool,
     color: Color,
 ) !void {
     const counts = makeDisplayCount(node.code, node.test_c, node.comment_c, node.blank_c, opts);
     try writeVisibleNums(w, counts, widths, opts, color);
+    if (show_complexity) {
+        try w.writeAll("  ");
+        try writeComplexityCell(w, node.complexityTenths(), complexity_width);
+    }
     try w.writeAll("  ");
 
     if (is_root) {
@@ -995,7 +1070,7 @@ fn printTree(
 
     for (node.children.items, 0..) |child, i| {
         const child_last = (i == node.children.items.len - 1);
-        try printTree(w, allocator, child, new_prefix, child_last, false, widths, opts, color);
+        try printTree(w, allocator, child, new_prefix, child_last, false, widths, complexity_width, opts, show_complexity, color);
     }
 }
 
@@ -1007,6 +1082,8 @@ const ExtRow = struct {
     test_c: u64,
     comment_c: u64,
     blank_c: u64,
+    decisions: u64 = 0,
+    functions: u64 = 0,
     added: u64 = 0,
     deleted: u64 = 0,
 
@@ -1020,6 +1097,10 @@ const ExtRow = struct {
 
     fn net(self: ExtRow) i128 {
         return @as(i128, @intCast(self.added)) - @as(i128, @intCast(self.deleted));
+    }
+
+    fn complexityTenths(self: ExtRow) ?u64 {
+        return complexityTenthsFor(self.decisions, self.functions);
     }
 };
 
@@ -1070,6 +1151,7 @@ fn printExtensionTable(
     total_blank: u64,
     descending: bool,
     opts: RenderOptions,
+    show_complexity: bool,
     color: Color,
 ) !void {
     const empty_author_rows = [_]AuthorRow{};
@@ -1086,12 +1168,18 @@ fn printExtensionTable(
         var et: u64 = 0;
         var em: u64 = 0;
         var eb: u64 = 0;
+        var ed: u64 = 0;
+        var ef: u64 = 0;
         for (files) |f| {
             if (!asciiEqlIgnoreCase(f.ext, e)) continue;
             ec += f.code_count;
             et += f.test_count;
             em += f.comment_count;
             eb += f.blank_count;
+            if (f.functions > 0) {
+                ed += f.decisions;
+                ef += f.functions;
+            }
         }
         const churn = churnForExt(churn_rows, e);
         rows[i] = .{
@@ -1100,6 +1188,8 @@ fn printExtensionTable(
             .test_c = et,
             .comment_c = em,
             .blank_c = eb,
+            .decisions = ed,
+            .functions = ef,
             .added = churn.added,
             .deleted = churn.deleted,
         };
@@ -1140,6 +1230,8 @@ fn printExtensionTable(
     var deleted_width: usize = @max(commaWidth(total_deleted), 7);
     var net_width: usize = @max(commaWidthI128(total_net), 3);
     var churn_width: usize = @max(percentCellWidth(total_deleted, total_added), 5);
+    var total_decisions: u64 = 0;
+    var total_functions: u64 = 0;
     for (rows) |r| {
         const counts = makeDisplayCount(r.code, r.test_c, r.comment_c, r.blank_c, opts);
         widths.primary = @max(widths.primary, commaWidth(counts.primary));
@@ -1151,6 +1243,12 @@ fn printExtensionTable(
         net_width = @max(net_width, commaWidthI128(r.net()));
         churn_width = @max(churn_width, percentCellWidth(r.deleted, r.added));
         max_ext = @max(max_ext, r.ext.len + 1); // +1 for leading '.'
+        total_decisions += r.decisions;
+        total_functions += r.functions;
+    }
+    var complexity_width: usize = @max(@as(usize, 5), complexityCellWidth(complexityTenthsFor(total_decisions, total_functions)));
+    for (rows) |r| {
+        complexity_width = @max(complexity_width, complexityCellWidth(r.complexityTenths()));
     }
     const bar_width: usize = 20;
 
@@ -1162,6 +1260,10 @@ fn printExtensionTable(
 
     // Header row
     try writeVisibleHeaders(w, widths, opts, color);
+    if (show_complexity) {
+        try w.writeAll("  ");
+        try writeRightHeader(w, "CX/FN", complexity_width, color);
+    }
     if (show_churn) {
         try w.writeAll("  ");
         try writeRightHeader(w, "ADDED", added_width, color);
@@ -1185,13 +1287,18 @@ fn printExtensionTable(
         @as(usize, 2) + added_width + 2 + deleted_width + 2 + net_width + 2 + churn_width
     else
         @as(usize, 0);
-    const header_rule_width = visibleColumnWidth(widths, opts) + churn_rule_width + 2 + max_ext + 1 + bar_width +
+    const complexity_rule_width = if (show_complexity) @as(usize, 2) + complexity_width else @as(usize, 0);
+    const header_rule_width = visibleColumnWidth(widths, opts) + complexity_rule_width + churn_rule_width + 2 + max_ext + 1 + bar_width +
         if (show_author_bars) @as(usize, 24) else @as(usize, 0);
     try writeRule(w, header_rule_width, color);
 
     for (rows) |r| {
         const counts = makeDisplayCount(r.code, r.test_c, r.comment_c, r.blank_c, opts);
         try writeVisibleNums(w, counts, widths, opts, color);
+        if (show_complexity) {
+            try w.writeAll("  ");
+            try writeComplexityCell(w, r.complexityTenths(), complexity_width);
+        }
         if (show_churn) {
             try w.writeAll("  ");
             try writeCodeNum(w, r.added, added_width, color);
@@ -1220,10 +1327,14 @@ fn printExtensionTable(
         try w.writeByte('\n');
     }
 
-    try writeRule(w, visibleColumnWidth(widths, opts) + churn_rule_width, color);
+    try writeRule(w, visibleColumnWidth(widths, opts) + complexity_rule_width + churn_rule_width, color);
 
     try w.writeAll(color.bold);
     try writeVisiblePlainNums(w, total_counts, widths, opts);
+    if (show_complexity) {
+        try w.writeAll("  ");
+        try writeComplexityCell(w, complexityTenthsFor(total_decisions, total_functions), complexity_width);
+    }
     if (show_churn) {
         try w.writeAll("  ");
         try writePlainPadded(w, total_added, added_width);
@@ -1238,6 +1349,125 @@ fn printExtensionTable(
     try w.writeAll("  TOTAL");
     try w.writeAll(color.reset);
     try w.writeByte('\n');
+}
+
+fn lessByComplexityDesc(_: void, a: FileCount, b: FileCount) bool {
+    const ac = a.complexityTenths().?;
+    const bc = b.complexityTenths().?;
+    if (ac != bc) return ac > bc;
+    if (a.decisions != b.decisions) return a.decisions > b.decisions;
+    if (a.functions != b.functions) return a.functions > b.functions;
+    return std.mem.lessThan(u8, a.path, b.path);
+}
+
+fn lessTopLinesDesc(_: void, a: FileCount, b: FileCount) bool {
+    if (a.total() != b.total()) return a.total() > b.total();
+    return std.mem.lessThan(u8, a.path, b.path);
+}
+
+fn writeTopHeading(w: *std.Io.Writer, title: []const u8, width: usize, color: Color) !void {
+    try w.writeAll(color.bold);
+    try w.writeAll(title);
+    try w.writeAll(color.reset);
+    try w.writeByte('\n');
+    try writeRule(w, width, color);
+}
+
+fn printTopComplexity(
+    w: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    files: []const FileCount,
+    limit: usize,
+    color: Color,
+) !void {
+    if (limit == 0) return;
+
+    const rows = try allocator.alloc(FileCount, files.len);
+    var row_count: usize = 0;
+    for (files) |f| {
+        if (f.functions == 0) continue;
+        rows[row_count] = f;
+        row_count += 1;
+    }
+    const top = rows[0..row_count];
+    std.mem.sort(FileCount, top, {}, lessByComplexityDesc);
+
+    const shown = @min(limit, top.len);
+    var score_width: usize = 5;
+    var fn_width: usize = 2;
+    var branch_width: usize = 2;
+    var path_width: usize = 4;
+    var max_score: u64 = 0;
+    for (top[0..shown]) |f| {
+        const score = f.complexityTenths().?;
+        score_width = @max(score_width, complexityCellWidth(score));
+        fn_width = @max(fn_width, commaWidth(f.functions));
+        branch_width = @max(branch_width, commaWidth(f.decisions));
+        path_width = @max(path_width, f.path.len);
+        max_score = @max(max_score, score);
+    }
+
+    try writeTopHeading(w, "TOP COMPLEXITY (CX/FN)", score_width + 2 + path_width + 26, color);
+    if (shown == 0) {
+        try w.writeAll(color.dim);
+        try w.writeAll("No files with detected functions.\n");
+        try w.writeAll(color.reset);
+        return;
+    }
+
+    const bar_width: usize = 20;
+    for (top[0..shown]) |f| {
+        const score = f.complexityTenths().?;
+        try writeComplexityCell(w, score, score_width);
+        try w.writeAll("  ");
+        try w.writeAll(f.path);
+        if (path_width > f.path.len) try padSpaces(w, path_width - f.path.len);
+        try w.writeAll("  (");
+        try writePlainPadded(w, f.functions, fn_width);
+        try w.writeAll(" fn, ");
+        try writePlainPadded(w, f.decisions, branch_width);
+        try w.writeAll(" br)  ");
+        try writeBar(w, score, max_score, bar_width, color);
+        try w.writeByte('\n');
+    }
+}
+
+fn printTopLines(
+    w: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    files: []const FileCount,
+    limit: usize,
+    color: Color,
+) !void {
+    if (limit == 0 or files.len == 0) return;
+
+    const rows = try allocator.alloc(FileCount, files.len);
+    @memcpy(rows, files);
+    std.mem.sort(FileCount, rows, {}, lessTopLinesDesc);
+
+    const shown = @min(limit, rows.len);
+    var total_width: usize = 5;
+    var path_width: usize = 4;
+    var max_total: u64 = 0;
+    for (rows[0..shown]) |f| {
+        const total = f.total();
+        total_width = @max(total_width, commaWidth(total));
+        path_width = @max(path_width, f.path.len);
+        max_total = @max(max_total, total);
+    }
+
+    try writeTopHeading(w, "TOP FILES BY LINES", total_width + 2 + path_width + 22, color);
+    const bar_width: usize = 20;
+    for (rows[0..shown]) |f| {
+        const total = f.total();
+        try writePlainPadded(w, total, total_width);
+        try w.writeAll("  ");
+        try w.writeAll(f.path);
+        if (path_width > f.path.len) try padSpaces(w, path_width - f.path.len);
+        try w.writeAll("  ");
+        try writeBar(w, total, max_total, bar_width, color);
+        try w.writeByte('\n');
+    }
 }
 
 // ---------- git reports ----------
@@ -1268,14 +1498,16 @@ const KindCounts = struct {
 
 const BlameContext = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     rows: std.ArrayList(AuthorRow) = .empty,
     index: std.StringHashMap(usize),
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     had_error: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-    fn init(allocator: std.mem.Allocator) BlameContext {
+    fn init(allocator: std.mem.Allocator, io: std.Io) BlameContext {
         return .{
             .allocator = allocator,
+            .io = io,
             .index = std.StringHashMap(usize).init(allocator),
         };
     }
@@ -1300,6 +1532,38 @@ fn percentWidthTenths(tenths: u64) usize {
 fn percentCellWidth(numerator: u64, denominator: u64) usize {
     if (denominator == 0) return 3; // n/a
     return percentWidthTenths(percentTenths(numerator, denominator));
+}
+
+fn complexityTenthsFor(decisions: u64, functions: u64) ?u64 {
+    if (functions == 0) return null;
+    const total = @as(u128, functions) + @as(u128, decisions);
+    const scaled = total * 10 + @as(u128, functions) / 2;
+    return @intCast(scaled / @as(u128, functions));
+}
+
+fn complexityWidthTenths(tenths: u64) usize {
+    return digitsU64(tenths / 10) + 2; // integer part, '.', one decimal
+}
+
+fn complexityCellWidth(tenths_opt: ?u64) usize {
+    const tenths = tenths_opt orelse return 3; // n/a
+    return complexityWidthTenths(tenths);
+}
+
+fn writeComplexityCell(
+    w: *std.Io.Writer,
+    tenths_opt: ?u64,
+    width: usize,
+) !void {
+    const tenths = tenths_opt orelse {
+        if (width > 3) try padSpaces(w, width - 3);
+        try w.writeAll("n/a");
+        return;
+    };
+
+    const cw = complexityWidthTenths(tenths);
+    if (width > cw) try padSpaces(w, width - cw);
+    try w.print("{d}.{d}", .{ tenths / 10, tenths % 10 });
 }
 
 fn writePercentCell(
@@ -1475,8 +1739,8 @@ fn parseBlameGroupHeader(line: []const u8) ?BlameGroup {
 
 fn addAuthorCountsLocked(ctx: *BlameContext, ext: []const u8, author: []const u8, counts: KindCounts) !void {
     if (counts.total() == 0) return;
-    ctx.mutex.lock();
-    defer ctx.mutex.unlock();
+    ctx.mutex.lockUncancelable(ctx.io);
+    defer ctx.mutex.unlock(ctx.io);
     try addAuthorCounts(ctx.allocator, &ctx.rows, &ctx.index, ext, author, counts);
 }
 
@@ -1511,9 +1775,10 @@ fn parseBlameIncrementalOutput(
     }
 }
 
-fn runBlameWorker(ctx: *BlameContext, state: *const BlameFileState) void {
+fn runBlameFile(ctx: *BlameContext, state: *const BlameFileState) void {
     const blame_opt = runGit(
         std.heap.page_allocator,
+        ctx.io,
         &.{ "git", "blame", "--incremental", "--", state.path },
         256 * 1024 * 1024,
     ) catch {
@@ -1526,6 +1791,19 @@ fn runBlameWorker(ctx: *BlameContext, state: *const BlameFileState) void {
     parseBlameIncrementalOutput(ctx, state, blame) catch {
         ctx.had_error.store(true, .monotonic);
     };
+}
+
+const BlameWorkerState = struct {
+    states: []const BlameFileState,
+    next: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+};
+
+fn runBlameWorker(ctx: *BlameContext, work: *BlameWorkerState) void {
+    while (true) {
+        const idx = work.next.fetchAdd(1, .monotonic);
+        if (idx >= work.states.len) return;
+        runBlameFile(ctx, &work.states[idx]);
+    }
 }
 
 fn blameJobCount(file_count: usize) usize {
@@ -1542,8 +1820,9 @@ fn lessAuthorByExtTotalDesc(_: void, a: AuthorRow, b: AuthorRow) bool {
 
 fn collectTrackedFileSet(
     allocator: std.mem.Allocator,
+    io: std.Io,
 ) !?std.StringHashMap(void) {
-    const tracked_opt = try runGit(allocator, &.{ "git", "ls-files" }, 128 * 1024 * 1024);
+    const tracked_opt = try runGit(allocator, io, &.{ "git", "ls-files" }, 128 * 1024 * 1024);
     const tracked = tracked_opt orelse return null;
 
     var set = std.StringHashMap(void).init(allocator);
@@ -1557,17 +1836,18 @@ fn collectTrackedFileSet(
 
 fn collectLineAuthorRows(
     allocator: std.mem.Allocator,
+    io: std.Io,
     files: []const FileCount,
     count_opts: CountOptions,
 ) ![]AuthorRow {
-    const tracked_set_opt = try collectTrackedFileSet(allocator);
+    const tracked_set_opt = try collectTrackedFileSet(allocator, io);
     var tracked_set = tracked_set_opt orelse return &[_]AuthorRow{};
 
     var states: std.ArrayList(BlameFileState) = .empty;
     for (files) |file| {
         if (!tracked_set.contains(file.path)) continue;
         if (file.total() == 0) continue;
-        const content = std.fs.cwd().readFileAlloc(allocator, file.path, 128 * 1024 * 1024) catch continue;
+        const content = std.Io.Dir.cwd().readFileAlloc(io, file.path, allocator, .limited(128 * 1024 * 1024)) catch continue;
         const plugin = lang_plugins.resolve(file.ext);
         const force_test = lang_plugins.isTestPath(file.path, plugin);
         const kinds = try lang_plugins.classifyFileLines(allocator, content, force_test, plugin, count_opts);
@@ -1580,22 +1860,18 @@ fn collectLineAuthorRows(
 
     if (states.items.len == 0) return &[_]AuthorRow{};
 
-    var ctx = BlameContext.init(allocator);
+    var ctx = BlameContext.init(allocator, io);
     if (states.items.len == 1) {
-        runBlameWorker(&ctx, &states.items[0]);
+        runBlameFile(&ctx, &states.items[0]);
     } else {
-        var pool: std.Thread.Pool = undefined;
-        try pool.init(.{
-            .allocator = std.heap.page_allocator,
-            .n_jobs = blameJobCount(states.items.len),
-        });
-        defer pool.deinit();
-
-        var wait_group: std.Thread.WaitGroup = .{};
-        for (states.items) |*state| {
-            pool.spawnWg(&wait_group, runBlameWorker, .{ &ctx, state });
+        var work = BlameWorkerState{ .states = states.items };
+        const job_count = blameJobCount(states.items.len);
+        var thread_buf: [8]std.Thread = undefined;
+        const threads = thread_buf[0..job_count];
+        for (threads) |*thread| {
+            thread.* = try std.Thread.spawn(.{}, runBlameWorker, .{ &ctx, &work });
         }
-        wait_group.wait();
+        for (threads) |thread| thread.join();
     }
 
     std.mem.sort(AuthorRow, ctx.rows.items, {}, lessAuthorByExtTotalDesc);
@@ -1641,22 +1917,24 @@ fn parseChurnNumstatLine(
 
 fn collectChurnRows(
     allocator: std.mem.Allocator,
+    io: std.Io,
     allowed: []const []const u8,
 ) !?[]ChurnRow {
     const matcher = try ChurnExtMatcher.init(allocator, allowed);
     const argv = &.{ "git", "log", "--all", "--no-merges", "--numstat", "--no-renames", "--format=" };
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return null;
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    }) catch return null;
 
     const stdout = child.stdout orelse {
-        _ = child.kill() catch {};
+        child.kill(io);
         return null;
     };
     var reader_buf: [64 * 1024]u8 = undefined;
-    var reader = stdout.readerStreaming(&reader_buf);
+    var reader = stdout.readerStreaming(io, &reader_buf);
 
     var rows: std.ArrayList(ChurnRow) = .empty;
     var index = std.StringHashMap(usize).init(allocator);
@@ -1665,11 +1943,11 @@ fn collectChurnRows(
         const line_opt = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
             error.ReadFailed => {
                 const read_err = reader.err.?;
-                _ = child.kill() catch {};
+                child.kill(io);
                 return read_err;
             },
             error.StreamTooLong => {
-                _ = child.kill() catch {};
+                child.kill(io);
                 return null;
             },
         };
@@ -1677,9 +1955,9 @@ fn collectChurnRows(
         try parseChurnNumstatLine(allocator, &rows, &index, &matcher, line);
     }
 
-    const term = child.wait() catch return null;
+    const term = child.wait(io) catch return null;
     switch (term) {
-        .Exited => |code| if (code != 0) return null,
+        .exited => |code| if (code != 0) return null,
         else => return null,
     }
 
@@ -1689,19 +1967,20 @@ fn collectChurnRows(
 
 // ---------- main ----------
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     var stdout_buf: [8192]u8 = undefined;
-    var stdout_file = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_file = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_file.interface;
 
-    const argv = try std.process.argsAlloc(allocator);
+    const argv = try init.minimal.args.toSlice(allocator);
 
     var opts = parseArgs(allocator, argv) catch |err| switch (err) {
-        ArgError.MissingValue, ArgError.UnknownOption => {
+        ArgError.MissingValue, ArgError.InvalidValue, ArgError.UnknownOption => {
             try printHelp(stdout);
             try stdout.flush();
             std.process.exit(2);
@@ -1721,7 +2000,7 @@ pub fn main() !void {
         return;
     }
 
-    const color = Color.init(colorEnabled(allocator));
+    const color = Color.init(colorEnabled(init.minimal.environ, io));
     const count_opts = CountOptions{
         .show_comments = opts.show_comments,
         .show_blanks = opts.show_blanks,
@@ -1735,13 +2014,13 @@ pub fn main() !void {
 
     const allowed = try buildAllowedExts(allocator, &opts);
 
-    const inside_git = isInsideGitRepo(allocator);
+    const inside_git = isInsideGitRepo(allocator, io);
     var files_raw: std.ArrayList([]const u8) = .empty;
     if (inside_git) {
         var seen = std.StringHashMap(void).init(allocator);
-        try collectFilesGit(allocator, &files_raw, allowed.items, &seen);
+        try collectFilesGit(allocator, io, &files_raw, allowed.items, &seen);
     } else {
-        try collectFilesWalk(allocator, &files_raw, allowed.items);
+        try collectFilesWalk(allocator, io, &files_raw, allowed.items);
     }
 
     var files: std.ArrayList(FileCount) = .empty;
@@ -1749,9 +2028,11 @@ pub fn main() !void {
     var total_test: u64 = 0;
     var total_comment: u64 = 0;
     var total_blank: u64 = 0;
+    var total_decisions: u64 = 0;
+    var total_functions: u64 = 0;
 
     for (files_raw.items) |path| {
-        const content = std.fs.cwd().readFileAlloc(allocator, path, 128 * 1024 * 1024) catch continue;
+        const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(128 * 1024 * 1024)) catch continue;
         const matched_ext = matchedAllowedExt(path, allowed.items) orelse continue;
         const plugin = lang_plugins.resolve(matched_ext);
         const force_test = lang_plugins.isTestPath(path, plugin);
@@ -1760,6 +2041,10 @@ pub fn main() !void {
         total_test += c.test_count;
         total_comment += c.comment_count;
         total_blank += c.blank_count;
+        if (c.functions > 0) {
+            total_decisions += c.decisions;
+            total_functions += c.functions;
+        }
         try files.append(allocator, .{
             .path = path,
             .ext = matched_ext,
@@ -1767,6 +2052,8 @@ pub fn main() !void {
             .comment_count = c.comment_count,
             .blank_count = c.blank_count,
             .code_count = c.code_count,
+            .decisions = c.decisions,
+            .functions = c.functions,
         });
     }
 
@@ -1776,7 +2063,7 @@ pub fn main() !void {
         if (!inside_git) {
             author_note = "line authors unavailable: not inside a git repository";
         } else {
-            const author_rows = try collectLineAuthorRows(allocator, files.items, count_opts);
+            const author_rows = try collectLineAuthorRows(allocator, io, files.items, count_opts);
             if (author_rows.len == 0) {
                 author_note = "line authors unavailable: git blame returned no tracked counted lines";
             } else {
@@ -1791,7 +2078,7 @@ pub fn main() !void {
         if (!inside_git) {
             churn_note = "churn unavailable: not inside a git repository";
         } else {
-            if (try collectChurnRows(allocator, allowed.items)) |churn_rows| {
+            if (try collectChurnRows(allocator, io, allowed.items)) |churn_rows| {
                 if (churn_rows.len == 0) {
                     churn_note = "churn unavailable: no matching file types in commit history";
                 } else {
@@ -1824,15 +2111,28 @@ pub fn main() !void {
             widths.comment = @max(widths.comment, commaWidth(counts.comment));
             widths.blank = @max(widths.blank, commaWidth(counts.blank));
         }
+        var complexity_width: usize = @max(@as(usize, 5), complexityCellWidth(complexityTenthsFor(total_decisions, total_functions)));
+        for (files.items) |f| {
+            complexity_width = @max(complexity_width, complexityCellWidth(f.complexityTenths()));
+        }
 
         try writeVisibleHeaders(stdout, widths, render_opts, color);
+        if (opts.show_complexity) {
+            try stdout.writeAll("  ");
+            try writeRightHeader(stdout, "CX/FN", complexity_width, color);
+        }
         try stdout.writeAll("  ");
         try writeLeftHeader(stdout, "PATH", color);
         try stdout.writeByte('\n');
-        try writeRule(stdout, visibleColumnWidth(widths, render_opts) + 2 + 32, color);
+        const complexity_rule_width = if (opts.show_complexity) @as(usize, 2) + complexity_width else @as(usize, 0);
+        try writeRule(stdout, visibleColumnWidth(widths, render_opts) + complexity_rule_width + 2 + 32, color);
 
         if (opts.descending) {
             try writeVisibleNums(stdout, total_counts, widths, render_opts, color);
+            if (opts.show_complexity) {
+                try stdout.writeAll("  ");
+                try writeComplexityCell(stdout, complexityTenthsFor(total_decisions, total_functions), complexity_width);
+            }
             try stdout.writeAll("  ");
             try stdout.writeAll(color.bold);
             try stdout.writeAll(".");
@@ -1845,6 +2145,10 @@ pub fn main() !void {
             for (sorted) |f| {
                 const counts = makeDisplayCount(f.code_count, f.test_count, f.comment_count, f.blank_count, render_opts);
                 try writeVisibleNums(stdout, counts, widths, render_opts, color);
+                if (opts.show_complexity) {
+                    try stdout.writeAll("  ");
+                    try writeComplexityCell(stdout, f.complexityTenths(), complexity_width);
+                }
                 try stdout.writeAll("  ");
                 if (lang_plugins.isTestPath(f.path, lang_plugins.resolve(f.ext))) {
                     try stdout.writeAll(color.yellow);
@@ -1858,7 +2162,7 @@ pub fn main() !void {
         } else {
             const root = try buildTree(allocator, files.items);
             sortTreeAlpha(root);
-            try printTree(stdout, allocator, root, "", false, true, widths, render_opts, color);
+            try printTree(stdout, allocator, root, "", false, true, widths, complexity_width, render_opts, opts.show_complexity, color);
         }
         try stdout.writeByte('\n');
     }
@@ -1875,8 +2179,19 @@ pub fn main() !void {
         total_blank,
         opts.descending,
         render_opts,
+        opts.show_complexity,
         color,
     );
+
+    if (opts.top_complexity) |limit| {
+        try stdout.writeByte('\n');
+        try printTopComplexity(stdout, allocator, files.items, limit, color);
+    }
+
+    if (opts.top_lines) |limit| {
+        try stdout.writeByte('\n');
+        try printTopLines(stdout, allocator, files.items, limit, color);
+    }
 
     if (author_note) |note| {
         try stdout.writeAll(color.dim);
@@ -1951,4 +2266,19 @@ test "parseArgs - git report flags" {
     const opts = try parseArgs(std.testing.allocator, &argv);
     try std.testing.expect(opts.line_authors);
     try std.testing.expect(opts.churn);
+}
+
+test "parseArgs - complexity and top list flags" {
+    const argv = [_][]const u8{ "sloc", "-x", "--top-complexity=10", "--top-lines", "7" };
+    const opts = try parseArgs(std.testing.allocator, &argv);
+    try std.testing.expect(opts.show_complexity);
+    try std.testing.expectEqual(@as(?usize, 10), opts.top_complexity);
+    try std.testing.expectEqual(@as(?usize, 7), opts.top_lines);
+}
+
+test "parseArgs - bare top complexity uses default and implies column" {
+    const argv = [_][]const u8{ "sloc", "--top-complexity" };
+    const opts = try parseArgs(std.testing.allocator, &argv);
+    try std.testing.expect(opts.show_complexity);
+    try std.testing.expectEqual(@as(?usize, default_top_n), opts.top_complexity);
 }

@@ -11,6 +11,8 @@ pub const LineCount = struct {
     comment_count: u64,
     blank_count: u64,
     code_count: u64,
+    decisions: u64 = 0,
+    functions: u64 = 0,
 };
 
 pub const LineKind = enum {
@@ -35,6 +37,26 @@ pub const InlineTestMode = enum {
 const empty_strings = [_][]const u8{};
 const empty_blocks = [_]BlockComment{};
 
+pub const Complexity = struct {
+    branch_keywords: []const []const u8 = &generic_branch_keywords,
+    branch_operators: []const []const u8 = &generic_branch_operators,
+    fn_keywords: []const []const u8 = &generic_fn_keywords,
+    fn_operators: []const []const u8 = &empty_strings,
+    fn_c_like: bool = false,
+};
+
+const disabled_complexity = Complexity{
+    .branch_keywords = &empty_strings,
+    .branch_operators = &empty_strings,
+    .fn_keywords = &empty_strings,
+    .fn_operators = &empty_strings,
+};
+const generic_branch_keywords = [_][]const u8{
+    "if", "elif", "for", "while", "case", "when", "catch", "except", "unless", "until",
+};
+const generic_branch_operators = [_][]const u8{ "&&", "||" };
+const generic_fn_keywords = [_][]const u8{ "fn", "def", "func", "function", "sub", "proc" };
+
 pub const Plugin = struct {
     name: []const u8,
     line_comment_prefixes: []const []const u8 = &empty_strings,
@@ -44,6 +66,7 @@ pub const Plugin = struct {
     dotted_test_markers: []const []const u8 = &empty_strings,
     exact_test_basenames: []const []const u8 = &empty_strings,
     inline_test_mode: InlineTestMode = .none,
+    complexity: Complexity = .{},
 };
 
 const generic_line_comment_prefixes = [_][]const u8{ "//", "--", "#", "'" };
@@ -105,32 +128,69 @@ const bang_prefixes = [_][]const u8{"!"};
 const slash_dash_prefixes = [_][]const u8{ "//-", "//" };
 const handlebars_prefixes = [_][]const u8{"{{!"};
 
+const c_family_complexity = Complexity{
+    .branch_keywords = &.{ "if", "for", "while", "case", "catch", "switch" },
+    .branch_operators = &.{ "&&", "||" },
+    .fn_keywords = &.{"function"},
+    .fn_operators = &.{"=>"},
+    .fn_c_like = true,
+};
+
+const go_complexity = Complexity{
+    .branch_keywords = &.{ "if", "for", "case", "select", "switch" },
+    .branch_operators = &.{ "&&", "||" },
+    .fn_keywords = &.{"func"},
+};
+
+const rust_complexity = Complexity{
+    .branch_keywords = &.{ "if", "while", "for", "loop", "match" },
+    .branch_operators = &.{ "&&", "||" },
+    .fn_keywords = &.{"fn"},
+};
+
+const zig_complexity = Complexity{
+    .branch_keywords = &.{ "if", "while", "for", "switch", "catch", "orelse", "and", "or" },
+    .branch_operators = &empty_strings,
+    .fn_keywords = &.{"fn"},
+};
+
+const python_complexity = Complexity{
+    .branch_keywords = &.{ "if", "elif", "for", "while", "except", "case", "and", "or" },
+    .branch_operators = &empty_strings,
+    .fn_keywords = &.{ "def", "lambda" },
+};
+
 const c_family_plugin = Plugin{
     .name = "c-family",
     .line_comment_prefixes = &slash_prefixes,
     .block_comments = &c_block_comments,
+    .complexity = c_family_complexity,
 };
 
 const go_like_plugin = Plugin{
     .name = "go-like",
     .line_comment_prefixes = &slash_prefixes,
     .block_comments = &c_block_comments,
+    .complexity = go_complexity,
 };
 
 const css_plugin = Plugin{
     .name = "css",
     .block_comments = &c_block_comments,
+    .complexity = disabled_complexity,
 };
 
 const html_plugin = Plugin{
     .name = "html",
     .block_comments = &markup_block_comments,
+    .complexity = disabled_complexity,
 };
 
 const svelte_plugin = Plugin{
     .name = "svelte",
     .line_comment_prefixes = &slash_prefixes,
     .block_comments = &svelte_block_comments,
+    .complexity = c_family_complexity,
 };
 
 const jvm_plugin = Plugin{
@@ -138,6 +198,7 @@ const jvm_plugin = Plugin{
     .line_comment_prefixes = &slash_prefixes,
     .block_comments = &c_block_comments,
     .test_filename_suffixes = &jvm_test_suffixes,
+    .complexity = c_family_complexity,
 };
 
 const rust_plugin = Plugin{
@@ -145,6 +206,7 @@ const rust_plugin = Plugin{
     .line_comment_prefixes = &slash_prefixes,
     .block_comments = &c_block_comments,
     .inline_test_mode = .rust_cfg_mod,
+    .complexity = rust_complexity,
 };
 
 const zig_plugin = Plugin{
@@ -152,6 +214,13 @@ const zig_plugin = Plugin{
     .line_comment_prefixes = &slash_prefixes,
     .exact_test_basenames = &zig_exact_test_basenames,
     .inline_test_mode = .zig_test_block,
+    .complexity = zig_complexity,
+};
+
+const python_plugin = Plugin{
+    .name = "python",
+    .line_comment_prefixes = &hash_prefixes,
+    .complexity = python_complexity,
 };
 
 const terraform_plugin = Plugin{
@@ -164,6 +233,12 @@ const nix_plugin = Plugin{
     .name = "nix",
     .line_comment_prefixes = &hash_prefixes,
     .block_comments = &c_block_comments,
+};
+
+const yaml_plugin = Plugin{
+    .name = "yaml",
+    .line_comment_prefixes = &hash_prefixes,
+    .complexity = disabled_complexity,
 };
 
 const lua_plugin = Plugin{
@@ -347,7 +422,9 @@ pub fn resolve(ext: []const u8) ?*const Plugin {
     if (hasExt(&[_][]const u8{"sql"}, ext)) return &sql_plugin;
     if (hasExt(&[_][]const u8{"lua"}, ext)) return &lua_plugin;
     if (hasExt(&[_][]const u8{"nix"}, ext)) return &nix_plugin;
+    if (hasExt(&[_][]const u8{ "yml", "yaml" }, ext)) return &yaml_plugin;
     if (hasExt(&[_][]const u8{"tf"}, ext)) return &terraform_plugin;
+    if (hasExt(&[_][]const u8{ "py", "pyi", "pyw", "rpy", "rpym", "rpymc" }, ext)) return &python_plugin;
     if (hasExt(&[_][]const u8{ "rkt", "rktd", "rktl" }, ext)) return &racket_plugin;
     if (hasExt(&[_][]const u8{"jl"}, ext)) return &julia_plugin;
     if (hasExt(&[_][]const u8{ "pug", "jade" }, ext)) return &pug_plugin;
@@ -453,7 +530,10 @@ pub fn countFile(
     var mc: u64 = 0;
     var bc: u64 = 0;
     var cc: u64 = 0;
+    var decisions: u64 = 0;
+    var functions: u64 = 0;
     var state = CountState{};
+    var complexity_state = ComplexityScanState{};
 
     var it = std.mem.splitScalar(u8, content, '\n');
     while (it.next()) |raw_line| {
@@ -462,6 +542,7 @@ pub fn countFile(
             line = line[0 .. line.len - 1];
         }
 
+        scanLineComplexity(line, plugin, &complexity_state, &decisions, &functions);
         updateInlineTestStateBeforeLine(line, plugin, force_test, &state);
         const analysis = analyzeLine(line, plugin, &state);
 
@@ -487,6 +568,8 @@ pub fn countFile(
         .comment_count = mc,
         .blank_count = bc,
         .code_count = cc,
+        .decisions = decisions,
+        .functions = functions,
     };
 }
 
@@ -519,6 +602,144 @@ const CountState = struct {
     pending_rust_cfg: bool = false,
     pending_zig_test: bool = false,
 };
+
+const ComplexityScanState = struct {
+    active_block_comment_end: ?[]const u8 = null,
+};
+
+fn complexityEnabled(spec: Complexity) bool {
+    return spec.branch_keywords.len > 0 or
+        spec.branch_operators.len > 0 or
+        spec.fn_keywords.len > 0 or
+        spec.fn_operators.len > 0 or
+        spec.fn_c_like;
+}
+
+fn scanLineComplexity(
+    line: []const u8,
+    plugin: ?*const Plugin,
+    state: *ComplexityScanState,
+    decisions: *u64,
+    functions: *u64,
+) void {
+    const spec = if (plugin) |lang| lang.complexity else disabled_complexity;
+    if (!complexityEnabled(spec)) return;
+
+    var i: usize = 0;
+    var code_start: usize = 0;
+    while (i < line.len) {
+        if (state.active_block_comment_end) |end| {
+            if (std.mem.indexOf(u8, line[i..], end)) |close_rel| {
+                i += close_rel + end.len;
+                state.active_block_comment_end = null;
+                code_start = i;
+                continue;
+            }
+            return;
+        }
+
+        if (matchLineCommentPrefix(line[i..], plugin) != null) {
+            scanComplexitySegment(line[code_start..i], spec, decisions, functions);
+            return;
+        }
+
+        if (matchBlockComment(line[i..], plugin)) |block| {
+            scanComplexitySegment(line[code_start..i], spec, decisions, functions);
+            i += block.start.len;
+            if (std.mem.indexOf(u8, line[i..], block.end)) |close_rel| {
+                i += close_rel + block.end.len;
+                code_start = i;
+                continue;
+            }
+            state.active_block_comment_end = block.end;
+            return;
+        }
+
+        i += 1;
+    }
+
+    scanComplexitySegment(line[code_start..], spec, decisions, functions);
+}
+
+fn scanComplexitySegment(
+    segment: []const u8,
+    spec: Complexity,
+    decisions: *u64,
+    functions: *u64,
+) void {
+    for (spec.branch_keywords) |kw| decisions.* += countWordHits(segment, kw);
+    for (spec.branch_operators) |op| decisions.* += countRawHits(segment, op);
+
+    const functions_before = functions.*;
+    for (spec.fn_keywords) |kw| functions.* += countWordHits(segment, kw);
+    for (spec.fn_operators) |op| functions.* += countRawHits(segment, op);
+    if (spec.fn_c_like and functions.* == functions_before and looksLikeCLikeFnDef(segment)) {
+        functions.* += 1;
+    }
+}
+
+fn countWordHits(text: []const u8, token: []const u8) u64 {
+    if (token.len == 0) return 0;
+    var count: u64 = 0;
+    var i: usize = 0;
+    while (i + token.len <= text.len) {
+        const rel = std.mem.indexOf(u8, text[i..], token) orelse break;
+        const at = i + rel;
+        const before_ok = at == 0 or !isCodeByte(text[at - 1]);
+        const after = at + token.len;
+        const after_ok = after >= text.len or !isCodeByte(text[after]);
+        if (before_ok and after_ok) count += 1;
+        i = after;
+    }
+    return count;
+}
+
+fn countRawHits(text: []const u8, token: []const u8) u64 {
+    if (token.len == 0) return 0;
+    var count: u64 = 0;
+    var i: usize = 0;
+    while (i + token.len <= text.len) {
+        const rel = std.mem.indexOf(u8, text[i..], token) orelse break;
+        count += 1;
+        i += rel + token.len;
+    }
+    return count;
+}
+
+fn looksLikeCLikeFnDef(text: []const u8) bool {
+    const trimmed = std.mem.trim(u8, text, " \t\r");
+    if (trimmed.len == 0) return false;
+    if (trimmed[0] == '#' or trimmed[0] == '@') return false;
+    if (startsWithAnyControlKeyword(trimmed)) return false;
+    if (std.mem.indexOf(u8, trimmed, "=>") != null) return false;
+
+    const first_paren = std.mem.indexOfScalar(u8, trimmed, '(') orelse return false;
+    const first_brace = std.mem.indexOfScalar(u8, trimmed, '{') orelse return false;
+    if (first_brace < first_paren) return false;
+    if (std.mem.indexOfScalar(u8, trimmed[first_paren..first_brace], ')') == null) return false;
+    if (std.mem.indexOfScalar(u8, trimmed[0..first_paren], '=') != null) return false;
+    if (std.mem.indexOfScalar(u8, trimmed[0..first_brace], ';') != null) return false;
+
+    return true;
+}
+
+fn startsWithAnyControlKeyword(trimmed: []const u8) bool {
+    const controls = [_][]const u8{
+        "if",    "else",      "for",      "while", "switch", "catch",
+        "case",  "do",        "return",   "guard", "match",  "try",
+        "await", "defer",     "using",    "class", "struct", "enum",
+        "union", "interface", "protocol",
+    };
+    for (controls) |kw| {
+        if (startsWithWord(trimmed, kw)) return true;
+    }
+    return false;
+}
+
+fn startsWithWord(text: []const u8, word: []const u8) bool {
+    if (!std.mem.startsWith(u8, text, word)) return false;
+    return text.len == word.len or !isCodeByte(text[word.len]);
+}
 
 fn classifyLine(
     line: []const u8,
@@ -741,7 +962,7 @@ fn updateInlineTestStateAfterLine(
 }
 
 fn startsWithZigTestDecl(line: []const u8) bool {
-    const trimmed = std.mem.trimLeft(u8, line, " \t\r");
+    const trimmed = std.mem.trimStart(u8, line, " \t\r");
     if (!std.mem.startsWith(u8, trimmed, "test")) return false;
     if (trimmed.len == 4) return true;
     const next = trimmed[4];
@@ -749,7 +970,7 @@ fn startsWithZigTestDecl(line: []const u8) bool {
 }
 
 fn updateZigTestDepthFromLine(line: []const u8, state: *CountState) void {
-    const trimmed = std.mem.trimLeft(u8, line, " \t\r");
+    const trimmed = std.mem.trimStart(u8, line, " \t\r");
     if (std.mem.startsWith(u8, trimmed, "\\\\")) return;
 
     var in_string = false;
@@ -795,7 +1016,7 @@ fn updateZigTestDepthFromLine(line: []const u8, state: *CountState) void {
 }
 
 fn isCfgContinuation(line: []const u8) bool {
-    const trimmed = std.mem.trimLeft(u8, line, " \t\r");
+    const trimmed = std.mem.trimStart(u8, line, " \t\r");
     if (trimmed.len == 0) return true;
     if (std.mem.startsWith(u8, trimmed, "#[")) return true;
     if (std.mem.startsWith(u8, trimmed, "mod")) {
@@ -918,6 +1139,33 @@ test "countFile - c semicolons do not split physical lines" {
     const src = "for (i = 0; i < n; i++) foo();\n";
     const result = countFile(src, false, resolve("c"), .{});
     try std.testing.expectEqual(@as(u64, 1), result.code_count);
+}
+
+test "countFile - complexity counts functions and decisions" {
+    const src =
+        \\fn alpha(a: bool, b: bool) void {
+        \\    if (a and b) return;
+        \\}
+        \\// fn ignored() void { if (false) {} }
+        \\fn beta() void {}
+    ;
+    const result = countFile(src, false, resolve("zig"), .{});
+    try std.testing.expectEqual(@as(u64, 2), result.functions);
+    try std.testing.expectEqual(@as(u64, 2), result.decisions);
+}
+
+test "countFile - complexity skips block comments and detects c-like functions" {
+    const src =
+        \\int main(void) {
+        \\    /* if ignored */
+        \\    if (ready && ok) return 1;
+        \\}
+        \\if (not_a_function) {
+        \\}
+    ;
+    const result = countFile(src, false, resolve("c"), .{});
+    try std.testing.expectEqual(@as(u64, 1), result.functions);
+    try std.testing.expectEqual(@as(u64, 3), result.decisions);
 }
 
 test "countFile - rust cfg test plugin" {

@@ -1,7 +1,7 @@
 {
   lib,
   stdenv,
-  zig_0_15,
+  zig_0_16,
   src ? lib.cleanSource ../.,
   version ? lib.removeSuffix "\n" (builtins.readFile ../VERSION),
 }:
@@ -11,7 +11,7 @@ stdenv.mkDerivation {
   inherit version src;
 
   strictDeps = true;
-  nativeBuildInputs = [ zig_0_15 ];
+  nativeBuildInputs = [ zig_0_16 ];
   dontConfigure = true;
   doCheck = true;
 

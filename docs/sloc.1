@@ -1,4 +1,4 @@
-.TH SLOC 1 "April 2026" "sloc" "User Commands"
+.TH SLOC 1 "June 2026" "sloc" "User Commands"
 .SH NAME
 sloc \- count source lines of code, comments, and tests
 .SH SYNOPSIS
@@ -14,8 +14,12 @@ sloc \- count source lines of code, comments, and tests
 [\fB-p\fR]
 [\fB-l\fR]
 [\fB-r\fR]
+[\fB-x\fR]
 [\fB--line-authors\fR]
 [\fB--churn\fR]
+[\fB--complexity\fR]
+[\fB--top-complexity\fR[\fB=\fIN\fR]]
+[\fB--top-lines\fR[\fB=\fIN\fR]]
 [\fB-V\fR]
 [\fB-h\fR]
 .SH DESCRIPTION
@@ -79,6 +83,20 @@ Add whole-history \fBgit log --all --no-merges --numstat --no-renames
 --format=\fR columns to the file-type summary. Churn is displayed as deleted
 lines divided by added lines. File types with historical churn but no current
 matching files are still shown.
+.TP
+.BR -x ", " --complexity
+Show a \fBCX/FN\fR column with average cyclomatic complexity per detected
+function. Complexity is token-scanned outside comments using per-language
+keyword and operator lists; it is a relative signal, not parser-grade
+per-function attribution. Files with no detected functions show \fBn/a\fR.
+.TP
+.BR --top-complexity "[=\fIN\fR]"
+List the top files by \fBCX/FN\fR after the file-type summary. When \fIN\fR is
+omitted, 5 files are shown. This also enables \fB--complexity\fR.
+.TP
+.BR --top-lines "[=\fIN\fR]"
+List the top files by total counted lines after the file-type summary. When
+\fIN\fR is omitted, 5 files are shown.
 .TP
 .BR -V ", " --version
 Print the program version.

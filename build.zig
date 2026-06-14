@@ -1,5 +1,5 @@
 const std = @import("std");
-const project_version = std.mem.trimRight(u8, @embedFile("VERSION"), "\r\n");
+const project_version = std.mem.trimEnd(u8, @embedFile("VERSION"), "\r\n");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});

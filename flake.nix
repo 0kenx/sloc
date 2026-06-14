@@ -45,7 +45,7 @@
         {
           default = pkgs.mkShell {
             packages = [
-              pkgs.zig_0_15
+              pkgs.zig_0_16
               pkgs.nixfmt-rfc-style
             ];
           };
